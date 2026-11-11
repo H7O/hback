@@ -1,0 +1,398 @@
+# Builds the downloads for every system and publishes them as a GitHub release when a version tag
+# is pushed:
+#
+#   git tag v0.1.2
+#   git push origin v0.1.2
+#
+# The build runs once on each of Linux, Windows and macOS. Each run tests hback on that system,
+# builds that system's downloads, then unpacks them and makes a real backup with them: first by
+# hand, then as a service installed the way the README tells people to install it. The ARM
+# downloads are then tried on ARM machines. The release is published only when all of that has
+# passed, so a tag that fails anywhere publishes nothing.
+#
+# "Run workflow" on the Actions page does everything except publish. Use it to try a change to
+# this file, or to see that a commit would release cleanly before you tag it.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# Only the last job writes to the repository, and it asks for that itself.
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: '10.0.x'
+  DOTNET_NOLOGO: 'true'
+  # The SFTP half of the tests runs against portable-sftp. Without a server those tests skip, and
+  # a skip does not fail a build, so this makes a missing server an error here.
+  SFTP_SERVER_RELEASE: https://github.com/H7O/portable-sftp/releases/download/v1.0.0
+  HBACK_TEST_SFTP_REQUIRED: '1'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    # A step that hangs would otherwise run for six hours, and a macOS minute counts as ten.
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # "targets" are .NET's names for the systems. The downloads are named after them, except
+          # that osx is spelled macos.
+          - name: Linux
+            os: ubuntu-latest
+            sftp: portable-sftp-linux-amd64
+            targets: linux-x64 linux-arm64 linux-arm linux-musl-x64 linux-musl-arm64
+          - name: Windows
+            os: windows-latest
+            sftp: portable-sftp-windows-amd64.exe
+            targets: win-x64 win-arm64
+          - name: macOS
+            os: macos-latest
+            sftp: portable-sftp-darwin-arm64
+            targets: osx-arm64 osx-x64
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # A tag names the version: v1.2.3 builds 1.2.3, whatever the project file says. A run without
+      # a tag builds the project file's version.
+      - name: Read the version
+        id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(dotnet msbuild src/hback/hback.csproj -getProperty:Version | tr -d '\r')
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "Building hback $version"
+
+      - name: Get the SFTP server the tests run against
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSLO "$SFTP_SERVER_RELEASE/${{ matrix.sftp }}"
+          curl -fsSLO "$SFTP_SERVER_RELEASE/${{ matrix.sftp }}.sha256"
+          if command -v sha256sum > /dev/null; then
+            sha256sum -c "${{ matrix.sftp }}.sha256"
+          else
+            shasum -a 256 -c "${{ matrix.sftp }}.sha256"
+          fi
+          chmod +x "${{ matrix.sftp }}"
+          echo "HBACK_TEST_SFTP_SERVER=${{ runner.temp }}/${{ matrix.sftp }}" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: dotnet test hback.slnx -c Release
+
+      # One download per target: a folder named hback holding the program, the sample
+      # configuration, the README and the licence. The project file makes a self-contained publish
+      # come out as one program file. Targets for another processor are built here as well, since
+      # nothing in hback is compiled for a processor by this step; they are tried further down.
+      - name: Build the downloads
+        env:
+          # Keeps macOS's tar from adding a "._" companion file for every file it packs.
+          COPYFILE_DISABLE: '1'
+        run: |
+          mkdir -p dist
+          # In the archive the files belong to root, not to whoever this build machine's user is.
+          # Linux has GNU tar and macOS has BSD tar, which spell that differently.
+          if tar --version | grep -q GNU; then owner=(--owner=0 --group=0); else owner=(--uid 0 --gid 0); fi
+          for target in ${{ matrix.targets }}; do
+            name="hback-${target/osx/macos}"
+            rm -rf stage
+            dotnet publish src/hback/hback.csproj -c Release -r "$target" --self-contained -p:Version="$VERSION" -o stage/hback
+            cp README.md LICENSE stage/hback/
+            if [[ "$target" == win-* ]]; then
+              pwsh -NoProfile -Command "Compress-Archive -Path stage/hback -DestinationPath dist/$name.zip"
+            else
+              tar -czf "dist/$name.tar.gz" "${owner[@]}" -C stage hback
+            fi
+          done
+          ls -l dist
+
+      # For any system without a download of its own: no .NET inside, so it needs the .NET runtime
+      # installed, and it runs wherever that does ("dotnet hback.dll").
+      - name: Build the portable download
+        if: runner.os == 'Linux'
+        run: |
+          rm -rf stage
+          dotnet publish src/hback/hback.csproj -c Release -p:UseAppHost=false -p:Version="$VERSION" -o stage/hback
+          # The SQLite package brings its library for phones and browsers too. hback does not run there.
+          rm -rf stage/hback/runtimes/{android-*,ios-*,iossimulator-*,maccatalyst-*,browser-wasm}
+          cp README.md LICENSE stage/hback/
+          tar -czf dist/hback-portable.tar.gz --owner=0 --group=0 -C stage hback
+          (cd stage && zip -qr ../dist/hback-portable.zip hback)
+          ls -l dist
+
+      - name: Try the downloads (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          bash .github/scripts/try-download.sh dist/hback-linux-x64.tar.gz "$VERSION"
+          bash .github/scripts/try-download.sh dist/hback-portable.tar.gz "$VERSION"
+          bash .github/scripts/try-download.sh dist/hback-portable.zip "$VERSION"
+          # The musl build is for Alpine Linux. The two packages are the ones the README names.
+          docker run --rm -v "$PWD:/repo" -w /repo alpine:3 sh -c \
+            "apk add --no-cache bash libgcc libstdc++ > /dev/null && bash .github/scripts/try-download.sh dist/hback-linux-musl-x64.tar.gz $VERSION"
+
+      - name: Try the downloads (Windows)
+        if: runner.os == 'Windows'
+        run: bash .github/scripts/try-download.sh dist/hback-win-x64.zip "$VERSION"
+
+      - name: Try the downloads (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          bash .github/scripts/try-download.sh dist/hback-macos-arm64.tar.gz "$VERSION"
+          # This machine has an Apple processor. It runs the Intel build through Rosetta, if it has it.
+          if arch -x86_64 /usr/bin/true 2> /dev/null; then
+            bash .github/scripts/try-download.sh dist/hback-macos-x64.tar.gz "$VERSION" "arch -x86_64"
+          else
+            echo "::warning::Rosetta is not on this machine, so the Intel build for macOS was built but not run."
+          fi
+
+      # The three steps below follow the README's "Running it as a service" section, command for
+      # command. Each backup is due once a minute, so its first run comes right after the start.
+
+      - name: Run it as a systemd service, as the README describes
+        if: runner.os == 'Linux'
+        run: |
+          sudo tar -xzf dist/hback-linux-x64.tar.gz -C /opt
+          sudo chown -R "$USER" /opt/hback
+
+          work="$RUNNER_TEMP/service"
+          mkdir -p "$work/source" "$work/destination"
+          echo "from the service" > "$work/source/served.txt"
+          cat > /opt/hback/hback.xml << EOF
+          <hback>
+            <backup>
+              <name>service</name>
+              <sys><interval>60000</interval></sys>
+              <sources>$work/source</sources>
+              <destination>$work/destination</destination>
+            </backup>
+          </hback>
+          EOF
+
+          sudo tee /etc/systemd/system/hback.service > /dev/null << EOF
+          [Unit]
+          Description=hback
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=notify
+          User=$USER
+          ExecStart=/opt/hback/hback
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          # Type=notify: this returns only when hback has told systemd that it is up.
+          sudo systemctl enable --now hback
+
+          for second in $(seq 1 30); do
+            [ -z "$(find "$work/destination" -name served.txt)" ] || break
+            sleep 1
+          done
+          /opt/hback/hback status
+          sudo journalctl -u hback --no-pager
+          [ -n "$(find "$work/destination" -name served.txt)" ] || { echo "The service made no backup."; exit 1; }
+          systemctl is-active hback
+          sudo systemctl stop hback
+
+      - name: Run it as a Windows service, as the README describes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Expand-Archive dist/hback-win-x64.zip -DestinationPath C:\tools
+
+          $work = Join-Path $env:RUNNER_TEMP service
+          New-Item -ItemType Directory -Force "$work\source", "$work\destination" | Out-Null
+          Set-Content "$work\source\served.txt" 'from the service'
+          Set-Content C:\tools\hback\hback.xml @"
+          <hback>
+            <backup>
+              <name>service</name>
+              <sys><interval>60000</interval></sys>
+              <sources>$work\source</sources>
+              <destination>$work\destination</destination>
+            </backup>
+          </hback>
+          "@
+
+          sc.exe create hback binPath= "C:\tools\hback\hback.exe" start= delayed-auto
+          if ($LASTEXITCODE -ne 0) { throw 'The service could not be created.' }
+          sc.exe start hback
+          if ($LASTEXITCODE -ne 0) { throw 'The service could not be started.' }
+
+          $copy = $null
+          foreach ($second in 1..30) {
+            $copy = Get-ChildItem "$work\destination" -Recurse -Filter served.txt
+            if ($copy) { break }
+            Start-Sleep 1
+          }
+          C:\tools\hback\hback.exe status
+          if (-not $copy) { throw 'The service made no backup.' }
+          if (-not ((sc.exe query hback) -match 'RUNNING')) { throw 'The service is not running.' }
+          sc.exe stop hback
+
+      - name: Run it at login on macOS, as the README describes
+        if: runner.os == 'macOS'
+        run: |
+          tar -xzf dist/hback-macos-arm64.tar.gz -C "$HOME"
+
+          work="$RUNNER_TEMP/service"
+          mkdir -p "$work/source" "$work/destination"
+          echo "from the service" > "$work/source/served.txt"
+          cat > "$HOME/hback/hback.xml" << EOF
+          <hback>
+            <backup>
+              <name>service</name>
+              <sys><interval>60000</interval></sys>
+              <sources>$work/source</sources>
+              <destination>$work/destination</destination>
+            </backup>
+          </hback>
+          EOF
+
+          mkdir -p "$HOME/Library/LaunchAgents"
+          cat > "$HOME/Library/LaunchAgents/com.github.h7o.hback.plist" << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key>
+            <string>com.github.h7o.hback</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>$HOME/hback/hback</string>
+            </array>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>KeepAlive</key>
+            <dict>
+              <key>SuccessfulExit</key>
+              <false/>
+            </dict>
+            <key>StandardErrorPath</key>
+            <string>$HOME/Library/Logs/hback.log</string>
+          </dict>
+          </plist>
+          EOF
+
+          launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.github.h7o.hback.plist"
+
+          for second in $(seq 1 30); do
+            [ -z "$(find "$work/destination" -name served.txt)" ] || break
+            sleep 1
+          done
+          "$HOME/hback/hback" status
+          cat "$HOME/Library/Logs/hback.log" 2> /dev/null || true
+          [ -n "$(find "$work/destination" -name served.txt)" ] || { echo "hback made no backup."; exit 1; }
+          launchctl print "gui/$(id -u)/com.github.h7o.hback" | grep "state = running"
+          launchctl bootout "gui/$(id -u)/com.github.h7o.hback"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: downloads-${{ matrix.name }}
+          path: dist/*
+          # They are archives already, and they are only here to reach the jobs below.
+          compression-level: 0
+          retention-days: 1
+
+  # The x64 machines above built the ARM downloads without being able to run them. These are ARM
+  # machines, and they run them.
+  try-arm:
+    name: Try on ${{ matrix.name }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux ARM
+            os: ubuntu-24.04-arm
+          - name: Windows ARM
+            os: windows-11-arm
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Try the downloads (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          bash .github/scripts/try-download.sh dist/hback-linux-arm64.tar.gz "$VERSION"
+          docker run --rm -v "$PWD:/repo" -w /repo alpine:3 sh -c \
+            "apk add --no-cache bash libgcc libstdc++ > /dev/null && bash .github/scripts/try-download.sh dist/hback-linux-musl-arm64.tar.gz $VERSION"
+          # The 32-bit build, in a 32-bit ARM container. This processor runs 32-bit programs itself.
+          docker run --rm --platform linux/arm/v7 -v "$PWD:/repo" -w /repo debian:stable-slim \
+            bash .github/scripts/try-download.sh dist/hback-linux-arm.tar.gz "$VERSION"
+
+      - name: Try the downloads (Windows)
+        if: runner.os == 'Windows'
+        run: bash .github/scripts/try-download.sh dist/hback-win-arm64.zip "$VERSION"
+
+  release:
+    name: Publish the release
+    # Only a tag publishes. A manual run stops before this.
+    if: github.ref_type == 'tag'
+    needs: [build, try-arm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Add the checksums
+        working-directory: dist
+        run: |
+          sha256sum hback-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # A version with a hyphen in it (v1.2.3-beta.1) is published as a prerelease, so it does not
+      # become the "latest" release that the README's download links point at.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=
+          case "$VERSION" in *-*) prerelease=--prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "hback $VERSION" \
+            --notes "Which download is for which system, and how to set it up: [Install](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/README.md#install). \`SHA256SUMS.txt\` holds the checksum of every download." \
+            --generate-notes \
+            $prerelease

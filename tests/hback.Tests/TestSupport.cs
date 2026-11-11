@@ -125,7 +125,8 @@ public sealed class TestEnv : IAsyncDisposable
 /// Runs portable-sftp (github.com/H7O/portable-sftp) for the SFTP tests, serving a scratch folder on
 /// this machine. So a test talks to a real SFTP server and can still look at the files it stored.
 /// The server is found through the HBACK_TEST_SFTP_SERVER environment variable (the full path of the
-/// portable-sftp program), or on the PATH. Without it the SFTP tests report themselves as skipped.
+/// portable-sftp program), or on the PATH. Without it the SFTP tests report themselves as skipped,
+/// unless HBACK_TEST_SFTP_REQUIRED is set, which makes them fail.
 /// </summary>
 public sealed class SftpServerFixture : IDisposable
 {
@@ -144,7 +145,7 @@ public sealed class SftpServerFixture : IDisposable
         var program = FindServer();
         if (program is null)
         {
-            Unavailable = "No SFTP test server. Set HBACK_TEST_SFTP_SERVER to the path of portable-sftp (github.com/H7O/portable-sftp).";
+            Unavailable = Missing("No SFTP test server. Set HBACK_TEST_SFTP_SERVER to the path of portable-sftp (github.com/H7O/portable-sftp).");
             return;
         }
 
@@ -172,9 +173,22 @@ public sealed class SftpServerFixture : IDisposable
 
         if (!WaitForPort(Port, TimeSpan.FromSeconds(10)))
         {
-            Unavailable = $"portable-sftp did not start listening on port {Port}.";
             Dispose();
+            Unavailable = Missing($"portable-sftp did not start listening on port {Port}.");
         }
+    }
+
+    /// <summary>
+    /// A skipped test does not fail a build, so a build machine that lost its SFTP server would pass
+    /// with half of the suite not run. Where the SFTP tests have to run, as they do before a
+    /// release, HBACK_TEST_SFTP_REQUIRED turns the missing server into an error, and every SFTP test
+    /// fails with this reason.
+    /// </summary>
+    private static string Missing(string why)
+    {
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("HBACK_TEST_SFTP_REQUIRED")))
+            throw new InvalidOperationException(why + " HBACK_TEST_SFTP_REQUIRED is set, so this is an error and not a skip.");
+        return why;
     }
 
     public DestinationSpec Destination(string folder) => new()

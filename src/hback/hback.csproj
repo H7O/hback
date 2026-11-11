@@ -13,6 +13,20 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- The line numbers of an error travel inside the program, so there is no .pdb file to ship. -->
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <!-- What a release download is made of. "dotnet publish -r linux-x64 (or another system)
+       with the self-contained switch" gives the program as one file with the .NET runtime inside it,
+       so the machine it runs on needs no .NET installed.
+       SQLite's native library stays a second file beside the program. Packing it in as well
+       (IncludeNativeLibrariesForSelfExtract) would have the program unpack it into a temp or home
+       folder before every first start, and a service account does not always have one it can
+       write to. The program is not compressed either (EnableCompressionInSingleFile): the download
+       is an archive already, and a compressed program has to hold all of itself in memory. -->
+  <PropertyGroup Condition="'$(SelfContained)' == 'true'">
+    <PublishSingleFile>true</PublishSingleFile>
   </PropertyGroup>
 
   <ItemGroup>
