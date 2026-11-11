@@ -142,14 +142,18 @@ public class ServiceTests(ITestOutputHelper output) : IAsyncLifetime
     {
         _env.Write("a.txt", "alpha");
         Directory.Delete(_destination); // The destination is gone: every run fails.
-        WriteConfig("<sys><interval>60000</interval></sys>", "<retries>0</retries>");
+        // sleep_on_error is how long the scheduler waits before it tries a task again that failed in
+        // its eyes, which is a task whose handler threw. One second makes such a retry show up here.
+        // (Before Com.H.Threading.Scheduler 11.0.0 it needed no setting: the retry came on every tick.)
+        WriteConfig("<sys><interval>60000</interval><sleep_on_error>1000</sleep_on_error></sys>", "<retries>0</retries>");
 
         using var host = Build();
         await host.StartAsync();
         try
         {
             await WaitForAsync(async () => (await _env.State.GetLastRunsAsync("svc", 5)).Any(r => r.Status == "failed"), "the first run to fail");
-            // The scheduler ticks every second. Had the failure escaped to it, several more runs would pile up here.
+            // Had the failure escaped to the scheduler, it would run the backup again every second and
+            // several more runs would pile up here.
             await Task.Delay(3500);
         }
         finally

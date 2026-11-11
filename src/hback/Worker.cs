@@ -70,10 +70,13 @@ public sealed class Worker(ILogger<Worker> log, ISchedulerService scheduler, Bac
 
     private async Task RunAsync(HTaskEventArgs e, CancellationToken ct)
     {
-        // Nothing may escape from here. When a handler throws, the scheduler does not record the run,
-        // finds the task still due a second later, and runs it again, without end. A backup that
-        // can't reach its server would hammer it. So a failure is logged and recorded here, and
+        // Nothing may escape from here. When a handler throws, the scheduler takes the run as failed
+        // and tries it again by its own rules: after the entry's sleep_on_error, or after its interval,
+        // or every 60 seconds for a backup that runs once a day, and without end unless the entry
+        // sets retry_attempts_on_error. That would come on top of hback's own retries and ignore the
+        // backup's retries and retry_wait_minutes. So a failure is logged and recorded here, and
         // waiting and trying again is done by BackupService.
+        // (Before Com.H.Threading.Scheduler 11.0.0 the scheduler tried again every second.)
         try
         {
             BackupJob job;
