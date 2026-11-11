@@ -229,6 +229,11 @@ instead of sending everything again.
 **Two runs at once.** The service and a manual `hback run` never write to the same destination
 together. The second one is skipped.
 
+**`hback.xml` is not valid XML.** The service refuses to start, says what is wrong and on which line,
+and exits with code 2. If the file breaks while the service is running, say it was saved half way
+through an edit, the service logs it and carries on with the backups it already knew until the file is
+fixed. A mistake inside one backup, such as a missing `<sources>`, stops only that backup.
+
 ### Host keys
 
 The first time hback connects to an SFTP server it remembers the server's host key, and logs it. From

@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>hback</AssemblyName>
     <RootNamespace>HBack</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Authors>Hussein Al Bayati</Authors>
     <Description>Copies the folders you pick to a local folder or an SFTP server, on a schedule, as plain files.</Description>
     <InvariantGlobalization>true</InvariantGlobalization>

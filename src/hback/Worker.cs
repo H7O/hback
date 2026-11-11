@@ -5,12 +5,19 @@ using HBack.Engine;
 
 namespace HBack;
 
+/// <summary>How the service ended, for the process's exit code.</summary>
+public sealed class ServiceOutcome
+{
+    public bool Failed { get; set; }
+}
+
 /// <summary>
 /// The service: Com.H.Threading.Scheduler watches hback.xml and says when a backup is due, and this
 /// class runs it. The scheduler re-reads the file when it changes, so editing the configuration needs
 /// no restart, and an edited backup runs straight away because the scheduler sees it as a new task.
 /// </summary>
-public sealed class Worker(ILogger<Worker> log, ISchedulerService scheduler, BackupService backups, AppPaths paths) : BackgroundService
+public sealed class Worker(ILogger<Worker> log, ISchedulerService scheduler, BackupService backups, AppPaths paths,
+    ServiceOutcome outcome, IHostApplicationLifetime lifetime) : BackgroundService
 {
     private readonly ConcurrentDictionary<Task, byte> _running = new();
 
@@ -26,7 +33,20 @@ public sealed class Worker(ILogger<Worker> log, ISchedulerService scheduler, Bac
             return Task.CompletedTask;
         };
 
-        await scheduler.StartAsync(stoppingToken);
+        try
+        {
+            await scheduler.StartAsync(stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Without the scheduler nothing would ever run, and a service that sits there doing
+            // nothing looks healthy. It stops instead, and says so with a failing exit code, so
+            // that whatever started it (systemd, the Windows service manager) knows.
+            log.LogError(ex, "The scheduler could not run, so hback is stopping: {Message}", ex.Message);
+            outcome.Failed = true;
+            lifetime.StopApplication();
+            return;
+        }
 
         // The scheduler returns as soon as it is told to stop. A backup that was running is still
         // writing its last record, and the state database must stay open until it has.

@@ -3,7 +3,8 @@ using Com.H.Threading.Scheduler;
 namespace HBack.Config;
 
 /// <summary>One entry of the configuration: the backup it describes, or why it could not be read.</summary>
-public sealed record ConfigEntry(BackupJob? Job, string? Error);
+/// <param name="WholeFile">True when the error is a file that is not valid XML, so none of its backups could be read.</param>
+public sealed record ConfigEntry(BackupJob? Job, string? Error, bool WholeFile = false);
 
 /// <summary>
 /// Reads the backups out of hback.xml for the commands that don't go through the scheduler
@@ -35,7 +36,7 @@ public static class ConfigLoader
                 entries.Add(new ConfigEntry(null, ex.Message));
             }
         }
-        entries.AddRange(loadErrors.Select(e => new ConfigEntry(null, e)));
+        entries.AddRange(loadErrors.Select(e => new ConfigEntry(null, e, WholeFile: true)));
 
         var duplicate = entries.Where(e => e.Job is not null)
             .GroupBy(e => e.Job!.Name, StringComparer.OrdinalIgnoreCase)

@@ -207,6 +207,50 @@ public class ServiceTests(ITestOutputHelper output) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_configuration_that_is_not_valid_XML_stops_the_service_from_starting()
+    {
+        // The <backup> element is never closed.
+        File.WriteAllText(_env.Paths.ConfigPath, "<hback>\n  <backup>\n    <name>svc</name>\n  <backup>\n</hback>");
+
+        var exitCode = await Cli.RunAsync(["--config", _env.Paths.ConfigPath, "--data", Path.Combine(_env.Root, "service-data")])
+            .WaitAsync(TimeSpan.FromSeconds(20));
+
+        Assert.Equal(2, exitCode);
+        var problem = Assert.Single(HBack.Config.ConfigLoader.Load(_env.Paths.ConfigPath));
+        Assert.True(problem.WholeFile);
+        // The message says what is wrong and where, in the XML parser's words.
+        Assert.Contains("'backup' start tag on line 4", problem.Error);
+    }
+
+    [Fact]
+    public async Task A_configuration_that_breaks_while_the_service_runs_is_logged_and_the_backups_carry_on()
+    {
+        _env.Write("a.txt", "alpha");
+        WriteConfig("<sys><interval>1000</interval></sys>");
+
+        using var host = Build();
+        await host.StartAsync();
+        try
+        {
+            await WaitForFileAsync("a.txt", "alpha");
+
+            // Saved half way through an edit.
+            await Task.Delay(1100);
+            var good = File.ReadAllText(_env.Paths.ConfigPath);
+            File.WriteAllText(_env.Paths.ConfigPath, good.Replace("</backup>", ""));
+            await WaitForAsync(() => Task.FromResult(_env.Log.Lines.Any(l => l.Contains("Can't read the configuration"))), "the broken file to be reported");
+
+            // The backup it knew keeps running on its interval.
+            _env.Write("b.txt", "beta");
+            await WaitForFileAsync("b.txt", "beta");
+        }
+        finally
+        {
+            await host.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task A_mistake_in_the_configuration_is_logged_and_the_service_keeps_running()
     {
         _env.Write("a.txt", "alpha");

@@ -159,10 +159,21 @@ public static class Cli
 
     private static async Task<int> RunServiceAsync(AppPaths paths, Options options)
     {
+        // A configuration file that is not valid XML is refused here, with the parser's own words
+        // for what is wrong and where. A backup with a mistake in it is a different matter: the
+        // service starts, and says so when that backup is due.
+        var unreadable = ConfigLoader.Load(paths.ConfigPath).Where(e => e.WholeFile).ToList();
+        if (unreadable.Count > 0)
+        {
+            foreach (var entry in unreadable) Console.Error.WriteLine(entry.Error);
+            Console.Error.WriteLine("hback did not start. Fix the file and start it again.");
+            return 2;
+        }
+
         await using var state = await StateStore.OpenAsync(paths.DbPath);
         using var host = BuildServiceHost(paths, state, logging => Logging.Configure(logging, paths, options.Verbose));
         await host.RunAsync();
-        return 0;
+        return host.Services.GetRequiredService<ServiceOutcome>().Failed ? 1 : 0;
     }
 
     /// <summary>The service, ready to start. The caller keeps the state database open until the host has stopped.</summary>
@@ -177,6 +188,7 @@ public static class Cli
 
         builder.Services.AddSingleton(paths);
         builder.Services.AddSingleton(state);
+        builder.Services.AddSingleton<ServiceOutcome>();
         builder.Services.AddSingleton<BackupService>();
         builder.Services.AddSchedulerService(o => o.ConfigPath = paths.ConfigPath);
         builder.Services.AddHostedService<Worker>();
