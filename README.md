@@ -47,7 +47,7 @@ install: the program carries the .NET it needs.
 | Alpine Linux on 64-bit ARM | [hback-linux-musl-arm64.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-linux-musl-arm64.tar.gz) |
 | macOS on Apple silicon (M1 and later) | [hback-macos-arm64.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-macos-arm64.tar.gz) |
 | macOS on Intel | [hback-macos-x64.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-macos-x64.tar.gz) |
-| Anything else that .NET 10 runs on | [hback-portable.zip](https://github.com/H7O/hback/releases/latest/download/hback-portable.zip) or [.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-portable.tar.gz) |
+| Anything else that .NET 11 runs on | [hback-portable.zip](https://github.com/H7O/hback/releases/latest/download/hback-portable.zip) or [.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-portable.tar.gz) |
 
 Not sure which Linux download is yours? `uname -m` names the processor: `x86_64` is Intel or AMD, and
 `aarch64` or `armv7l` is ARM. `getconf LONG_BIT` says whether the system is 32-bit or 64-bit.
@@ -71,7 +71,7 @@ hback is not signed, so Windows may say it protected your PC from an unrecognize
 "More info" and then "Run anyway". To avoid the question, run `Unblock-File hback-win-x64.zip` before
 unpacking.
 
-It needs Windows 10 or Windows Server 2012, or later.
+It needs Windows 10 or Windows Server 2016, or later.
 
 ### Linux
 
@@ -115,7 +115,7 @@ It needs macOS 15 or later.
 ### Any other system
 
 `hback-portable` has no .NET inside it. Install the
-[.NET 10 runtime](https://dotnet.microsoft.com/download/dotnet/10.0), unpack the download, and
+[.NET 11 runtime](https://dotnet.microsoft.com/download/dotnet/11.0), unpack the download, and
 wherever this page says `hback`, type `dotnet hback.dll` with the path of that file.
 
 ### Updating
@@ -415,7 +415,7 @@ line to add to `hback.xml`. To check the key before the first connection instead
 
 ## Building and testing
 
-It needs the .NET 10 SDK.
+It needs the .NET 11 SDK.
 
 ```
 dotnet build
@@ -447,14 +447,14 @@ In place of `linux-x64` goes .NET's name for your system: `win-x64`, `win-arm64`
 A tag that starts with `v` publishes a release:
 
 ```
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The [release workflow](.github/workflows/release.yml) then runs on Linux, Windows and macOS. On each
 it runs the tests, builds that system's downloads, and makes a real backup with them, by hand and as a
 service. It publishes the release only if all of that passed. The version comes from the tag. A tag
-with a hyphen in it, such as `v0.2.0-beta.1`, is published as a prerelease.
+with a hyphen in it, such as `v0.3.0-beta.1`, is published as a prerelease.
 
 "Run workflow" on the repository's Actions page does the same without publishing anything.
 
@@ -464,3 +464,7 @@ with a hyphen in it, such as `v0.2.0-beta.1`, is published as a prerelease.
 - [Com.H.Net.Ssh](https://github.com/H7O/Com.H.Net.Ssh) (over SSH.NET) is the SFTP connection.
 - [Com.H.Data.Common](https://github.com/H7O/Com.H.Data.Common) runs the SQL against hback's SQLite state database.
 - [Com.H.Extensions.Logging.File](https://www.nuget.org/packages/Com.H.Extensions.Logging.File) writes the daily log files.
+
+## License
+
+hback is free to use, change and share under the [MIT license](LICENSE).

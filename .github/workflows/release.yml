@@ -1,8 +1,8 @@
 # Builds the downloads for every system and publishes them as a GitHub release when a version tag
 # is pushed:
 #
-#   git tag v0.1.2
-#   git push origin v0.1.2
+#   git tag v0.2.0
+#   git push origin v0.2.0
 #
 # The build runs once on each of Linux, Windows and macOS. Each run tests hback on that system,
 # builds that system's downloads, then unpacks them and makes a real backup with them: first by
@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 env:
-  DOTNET_VERSION: '10.0.x'
+  DOTNET_VERSION: '11.0.x'
   DOTNET_NOLOGO: 'true'
   # The SFTP half of the tests runs against portable-sftp. Without a server those tests skip, and
   # a skip does not fail a build, so this makes a missing server an error here.
