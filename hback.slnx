@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/hback/hback.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/hback.Tests/hback.Tests.csproj" />
+  </Folder>
+</Solution>

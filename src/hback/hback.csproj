@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>hback</AssemblyName>
+    <RootNamespace>HBack</RootNamespace>
+    <Version>0.1.0</Version>
+    <Authors>Hussein Al Bayati</Authors>
+    <Description>Copies the folders you pick to a local folder or an SFTP server, on a schedule, as plain files.</Description>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="hback.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Com.H.Threading.Scheduler.DI" Version="10.1.0" />
+    <PackageReference Include="Com.H.Net.Ssh" Version="10.2.1" />
+    <PackageReference Include="Com.H.Data.Common" Version="10.1.0.15" />
+    <PackageReference Include="Com.H.Extensions.Logging.File" Version="1.3.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.15" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.15" />
+    <!-- Microsoft.Data.Sqlite still floors the native SQLite bundle at 2.1.x, which carries
+         CVE-2025-6965. A direct reference takes the 3.x bundle, as DBToRestAPI does. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The sample is shipped beside the binary. The real hback.xml is the user's and is never
+         overwritten by a build or a publish. -->
+    <None Include="hback.sample.xml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

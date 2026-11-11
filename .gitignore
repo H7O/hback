@@ -1,0 +1,12 @@
+bin/
+obj/
+.vs/
+*.user
+publish/
+TestResults/
+
+# A real configuration holds host names and maybe a password. The sample is what belongs in git.
+hback.xml
+hback.xml.log
+/data/
+scratchpad/
