@@ -30,21 +30,111 @@ When a file changes or is deleted, hback does not destroy the copy it has. It mo
 `history/`, in a folder named after the run. History older than `keep_history_days` (30 by default) is
 deleted. This is what saves you from a file you overwrote or deleted by mistake last week.
 
-## Getting started
+## Install
 
-1. Build it (needs the .NET 10 SDK), as one self-contained file for your system:
+Every [release](https://github.com/H7O/hback/releases/latest) has a download for each system. Take
+yours, unpack it, and you have a folder named `hback` with the program in it. There is nothing else to
+install: the program carries the .NET it needs.
 
-   ```
-   dotnet publish src/hback -c Release -r win-x64   --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/win-x64
-   dotnet publish src/hback -c Release -r linux-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/linux-x64
-   ```
+| Your system | Download |
+| --- | --- |
+| Windows on Intel or AMD, which is most PCs | [hback-win-x64.zip](https://github.com/H7O/hback/releases/latest/download/hback-win-x64.zip) |
+| Windows on ARM | [hback-win-arm64.zip](https://github.com/H7O/hback/releases/latest/download/hback-win-arm64.zip) |
+| Linux on Intel or AMD | [hback-linux-x64.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-linux-x64.tar.gz) |
+| Linux on 64-bit ARM, such as a Raspberry Pi with a 64-bit system | [hback-linux-arm64.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-linux-arm64.tar.gz) |
+| Linux on 32-bit ARM, such as a Raspberry Pi with a 32-bit system | [hback-linux-arm.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-linux-arm.tar.gz) |
+| Alpine Linux on Intel or AMD | [hback-linux-musl-x64.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-linux-musl-x64.tar.gz) |
+| Alpine Linux on 64-bit ARM | [hback-linux-musl-arm64.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-linux-musl-arm64.tar.gz) |
+| macOS on Apple silicon (M1 and later) | [hback-macos-arm64.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-macos-arm64.tar.gz) |
+| macOS on Intel | [hback-macos-x64.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-macos-x64.tar.gz) |
+| Anything else that .NET 10 runs on | [hback-portable.zip](https://github.com/H7O/hback/releases/latest/download/hback-portable.zip) or [.tar.gz](https://github.com/H7O/hback/releases/latest/download/hback-portable.tar.gz) |
 
-   Use `osx-arm64` or `linux-arm64` for those machines. Put the result in a folder of its own, such as
-   `C:\tools\hback` or `/opt/hback`.
+Not sure which Linux download is yours? `uname -m` names the processor: `x86_64` is Intel or AMD, and
+`aarch64` or `armv7l` is ARM. `getconf LONG_BIT` says whether the system is 32-bit or 64-bit.
 
-2. Copy `hback.sample.xml` to `hback.xml` beside the program and edit it.
+Each release also has a `SHA256SUMS.txt` with the checksum of every download.
 
-3. See what it would do, without copying anything:
+### Windows
+
+In PowerShell, in the folder you downloaded to:
+
+```powershell
+Expand-Archive hback-win-x64.zip -DestinationPath C:\tools
+C:\tools\hback\hback version
+```
+
+That puts hback in `C:\tools\hback`. Another folder is fine as long as you can write to it, which
+rules out `C:\Program Files`: hback keeps its configuration, its database and its logs in its own
+folder.
+
+hback is not signed, so Windows may say it protected your PC from an unrecognized app. Choose
+"More info" and then "Run anyway". To avoid the question, run `Unblock-File hback-win-x64.zip` before
+unpacking.
+
+It needs Windows 10 or Windows Server 2012, or later.
+
+### Linux
+
+```sh
+curl -LO https://github.com/H7O/hback/releases/latest/download/hback-linux-x64.tar.gz
+sudo mkdir /opt/hback
+sudo chown $USER /opt/hback
+tar -xzf hback-linux-x64.tar.gz -C /opt/hback --strip-components=1
+/opt/hback/hback version
+```
+
+That puts hback in `/opt/hback` and makes the folder yours. It has to be yours, because hback keeps
+its configuration, its database and its logs in it. To type `hback` from anywhere:
+
+```sh
+sudo ln -s /opt/hback/hback /usr/local/bin/hback
+```
+
+It needs glibc 2.27 or later, which Ubuntu 18.04, Debian 10 and everything newer have. The 32-bit ARM
+download needs glibc 2.35: Debian 12, Raspberry Pi OS Bookworm, Ubuntu 22.04, or newer. It does not
+run on the Raspberry Pi 1 or the original Pi Zero, whose processor .NET doesn't support.
+
+On Alpine, install two libraries first: `apk add libgcc libstdc++`.
+
+### macOS
+
+```sh
+curl -LO https://github.com/H7O/hback/releases/latest/download/hback-macos-arm64.tar.gz
+tar -xzf hback-macos-arm64.tar.gz -C ~
+~/hback/hback version
+```
+
+That puts hback in the `hback` folder of your home folder.
+
+Download it with `curl` as shown, not with a browser. macOS marks every file a browser downloads, and
+then refuses to run a program that doesn't come from a developer registered with Apple. If you did use
+a browser, remove the mark: `xattr -dr com.apple.quarantine ~/hback`.
+
+It needs macOS 15 or later.
+
+### Any other system
+
+`hback-portable` has no .NET inside it. Install the
+[.NET 10 runtime](https://dotnet.microsoft.com/download/dotnet/10.0), unpack the download, and
+wherever this page says `hback`, type `dotnet hback.dll` with the path of that file.
+
+### Updating
+
+Stop hback if it runs as a service, unpack the new download over the old folder, and start it again.
+Unpacking is the same `tar` line as above, or the same `Expand-Archive` line with `-Force` added. Your
+`hback.xml` and the `data` folder are not part of a download, so an update leaves them alone.
+
+## Your first backup
+
+From here on this page writes `hback` for the program. Type its path instead (`C:\tools\hback\hback`,
+`/opt/hback/hback`, `~/hback/hback`) unless you made it reachable from anywhere.
+
+1. In hback's folder, copy `hback.sample.xml` to `hback.xml` and edit it. Under `<sources>` list the
+   folders to back up, and in `<destination>` say where the copies go. The sample is written for
+   Windows. On Linux and macOS write paths the way your system does, such as `/home/me/code` or
+   `~/Documents/notes`. [Configuration](#configuration) explains every setting.
+
+2. See what it would do, without copying anything:
 
    ```
    hback run --dry-run
@@ -53,7 +143,14 @@ deleted. This is what saves you from a file you overwrote or deleted by mistake 
    For a first backup this also shows where the space goes, folder by folder, which is the quickest
    way to find what to exclude.
 
-4. Run it once by hand with `hback run`, then install it as a service (below).
+3. Run it for real, and look at how it went:
+
+   ```
+   hback run
+   hback status
+   ```
+
+4. Have it run by itself from now on: see [Running it as a service](#running-it-as-a-service).
 
 ## Configuration
 
@@ -167,7 +264,12 @@ hback never writes over the original location by itself. `--at` takes the name o
 
 ## Running it as a service
 
-**Linux (systemd).** Save as `/etc/systemd/system/hback.service`, then `systemctl enable --now hback`:
+Started with no command, hback follows the schedule in `hback.xml` until it is stopped. Each system
+has its own way of starting a program like that with the machine and keeping it running.
+
+### Linux (systemd)
+
+Save this as `/etc/systemd/system/hback.service`, with your user name in place of `me`:
 
 ```ini
 [Unit]
@@ -185,10 +287,24 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-Under systemd, hback writes to the journal with proper levels: `journalctl -u hback -p warning` shows
-only what went wrong.
+Then start it, now and at every boot:
 
-**Windows.** From an administrator prompt:
+```sh
+sudo systemctl enable --now hback
+```
+
+`User` is whoever owns `/opt/hback`, and `~` in `hback.xml` is that user's home folder.
+
+Under systemd, hback writes to the journal with proper levels: `journalctl -u hback -p warning` shows
+only what went wrong. `sudo systemctl stop hback` stops it, and `sudo systemctl disable hback` keeps it
+from starting at boot.
+
+Alpine has no systemd. Start `hback` from the service manager you use there, or see "Without a
+service" below.
+
+### Windows
+
+From an administrator prompt:
 
 ```
 sc.exe create hback binPath= "C:\tools\hback\hback.exe" start= delayed-auto
@@ -199,8 +315,54 @@ A Windows service runs as the system account unless told otherwise. That account
 yours, so write full paths instead of `~` in `hback.xml`, and it can't see mapped network drives. To
 run it as yourself: `sc.exe config hback obj= ".\yourname" password= "..."`.
 
-**Without a service.** `hback run` from cron or Task Scheduler works as well. The `<sys>` element is
-then not used.
+`sc.exe stop hback` stops it, and `sc.exe delete hback` removes the service.
+
+### macOS (launchd)
+
+Save this as `~/Library/LaunchAgents/com.github.h7o.hback.plist`, with your user name in place of `me`
+in both paths:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.github.h7o.hback</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/me/hback/hback</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardErrorPath</key>
+  <string>/Users/me/Library/Logs/hback.log</string>
+</dict>
+</plist>
+```
+
+Then start it, now and every time you log in:
+
+```sh
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.h7o.hback.plist
+```
+
+hback runs as you, while you are logged in. If it could not start, say because `hback.xml` has a
+mistake in it, the reason is in `~/Library/Logs/hback.log`.
+`launchctl bootout gui/$(id -u)/com.github.h7o.hback` stops it.
+
+macOS decides which programs may read your Documents, Desktop and Downloads folders and your external
+drives. If a backup reports files there that it could not read, add `hback` under System Settings >
+Privacy & Security > Full Disk Access. After an update macOS may want that done again.
+
+### Without a service
+
+`hback run` from cron or Task Scheduler works as well. The `<sys>` element is then not used.
 
 ## What happens when
 
@@ -253,6 +415,8 @@ line to add to `hback.xml`. To check the key before the first connection instead
 
 ## Building and testing
 
+It needs the .NET 10 SDK.
+
 ```
 dotnet build
 dotnet test
@@ -266,7 +430,33 @@ where it is, or have it on your PATH:
 set HBACK_TEST_SFTP_SERVER=C:\tools\portable-sftp.exe
 ```
 
-Without it, the SFTP tests report themselves as skipped.
+Without it, the SFTP tests report themselves as skipped. Set `HBACK_TEST_SFTP_REQUIRED=1` as well to
+have them fail instead, which is what a build machine wants.
+
+To build a download yourself, as one program file with .NET inside it:
+
+```
+dotnet publish src/hback -c Release -r linux-x64 --self-contained -o publish/hback
+```
+
+In place of `linux-x64` goes .NET's name for your system: `win-x64`, `win-arm64`, `linux-arm64`,
+`linux-arm`, `linux-musl-x64`, `linux-musl-arm64`, `osx-arm64` or `osx-x64`.
+
+### Releasing
+
+A tag that starts with `v` publishes a release:
+
+```
+git tag v0.1.2
+git push origin v0.1.2
+```
+
+The [release workflow](.github/workflows/release.yml) then runs on Linux, Windows and macOS. On each
+it runs the tests, builds that system's downloads, and makes a real backup with them, by hand and as a
+service. It publishes the release only if all of that passed. The version comes from the tag. A tag
+with a hyphen in it, such as `v0.2.0-beta.1`, is published as a prerelease.
+
+"Run workflow" on the repository's Actions page does the same without publishing anything.
 
 ## Built on
 

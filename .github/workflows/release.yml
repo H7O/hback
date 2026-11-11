@@ -41,7 +41,7 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    # A step that hangs would otherwise run for six hours, and a macOS minute counts as ten.
+    # A whole run takes about five minutes. Without this, a step that hangs would run for six hours.
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -172,8 +172,10 @@ jobs:
       - name: Run it as a systemd service, as the README describes
         if: runner.os == 'Linux'
         run: |
-          sudo tar -xzf dist/hback-linux-x64.tar.gz -C /opt
-          sudo chown -R "$USER" /opt/hback
+          sudo mkdir /opt/hback
+          sudo chown "$USER" /opt/hback
+          tar -xzf dist/hback-linux-x64.tar.gz -C /opt/hback --strip-components=1
+          sudo ln -s /opt/hback/hback /usr/local/bin/hback
 
           work="$RUNNER_TEMP/service"
           mkdir -p "$work/source" "$work/destination"
@@ -212,7 +214,8 @@ jobs:
             [ -z "$(find "$work/destination" -name served.txt)" ] || break
             sleep 1
           done
-          /opt/hback/hback status
+          # Through the link in /usr/local/bin: hback has to find its folder, and hback.xml in it, from there.
+          hback status
           sudo journalctl -u hback --no-pager
           [ -n "$(find "$work/destination" -name served.txt)" ] || { echo "The service made no backup."; exit 1; }
           systemctl is-active hback
