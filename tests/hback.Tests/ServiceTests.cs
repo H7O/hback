@@ -169,8 +169,15 @@ public class ServiceTests(ITestOutputHelper output) : IAsyncLifetime
     [SkippableFact]
     public async Task A_daily_backup_runs_once_its_time_has_passed_and_not_before()
     {
+        // One backup is set for five minutes ago and one for five minutes from now. Both times have to
+        // be today's, and in the five minutes on each side of midnight one of them is not. The window
+        // is kept that small on purpose: a skipped test does not fail a build, so a release built
+        // inside it goes out without this test.
         var now = DateTime.Now;
-        Skip.If(now.Hour is 0 or 23, "Too close to midnight to have a time earlier and a time later today.");
+        var passed = now.AddMinutes(-5);
+        var ahead = now.AddMinutes(5);
+        Skip.If(passed.Date != now.Date || ahead.Date != now.Date,
+            "Too close to midnight to have a time earlier and a time later today.");
         _env.Write("a.txt", "alpha");
         var later = Path.Combine(_env.Root, "dest-later");
         Directory.CreateDirectory(later);
@@ -179,13 +186,13 @@ public class ServiceTests(ITestOutputHelper output) : IAsyncLifetime
             <hback>
               <backup>
                 <name>svc</name>
-                <sys><time>{now.AddMinutes(-30):HH:mm}</time></sys>
+                <sys><time>{passed:HH:mm}</time></sys>
                 <sources>{_env.SourceDir}</sources>
                 <destination>{_destination}</destination>
               </backup>
               <backup>
                 <name>later</name>
-                <sys><time>{now.AddMinutes(30):HH:mm}</time></sys>
+                <sys><time>{ahead:HH:mm}</time></sys>
                 <sources>{_env.SourceDir}</sources>
                 <destination>{later}</destination>
               </backup>
