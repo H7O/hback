@@ -299,6 +299,71 @@ public class ServiceTests(ITestOutputHelper output) : IAsyncLifetime
             $"The backup started at {run.StartedUtc:HH:mm:ss.fff} UTC, before {notBefore.ToUniversalTime():HH:mm:ss} UTC.");
     }
 
+    /// <summary>
+    /// &lt;bom&gt; is the scheduler's tag for the first day of the month. Before
+    /// Com.H.Threading.Scheduler 11.0.1 it was read and never acted on, so a backup with it ran
+    /// every day, and hback refused the tag. This holds the scheduler hback is built on to what the
+    /// README now says of the tag.
+    /// </summary>
+    [Fact]
+    public async Task A_backup_for_the_first_day_of_the_month_runs_today_only_if_today_is_that_day()
+    {
+        var before = DateTime.Now;
+        _env.Write("a.txt", "alpha");
+        var monthly = Path.Combine(_env.Root, "monthly");
+        Directory.CreateDirectory(monthly);
+        // Two backups with a daily time that has passed. They differ in <bom> alone.
+        File.WriteAllText(_env.Paths.ConfigPath, $"""
+            <hback>
+              <backup>
+                <name>monthly</name>
+                <sys><time>00:00</time><bom>true</bom></sys>
+                <sources>{_env.SourceDir}</sources>
+                <destination>{monthly}</destination>
+              </backup>
+              <backup>
+                <name>svc</name>
+                <sys><time>00:00</time></sys>
+                <sources>{_env.SourceDir}</sources>
+                <destination>{_destination}</destination>
+              </backup>
+            </hback>
+            """);
+
+        using var host = Build();
+        await host.StartAsync();
+        try
+        {
+            await WaitForFileAsync("a.txt", "alpha");
+            // The scheduler looks every second. Two more looks, in which a backup that is due would start.
+            await Task.Delay(2500);
+            if (before.Day == 1)
+            {
+                var copy = Path.Combine(monthly, BackupLayout.Current, _env.InBackup("a.txt").Replace('/', Path.DirectorySeparatorChar));
+                await WaitForAsync(() => Task.FromResult(TryRead(copy) == "alpha"), "the monthly backup to run on the 1st");
+            }
+        }
+        finally
+        {
+            await host.StopAsync();
+        }
+
+        // A run across midnight proves nothing either way.
+        if (DateTime.Now.Day != before.Day) return;
+        Assert.Single(await _env.State.GetLastRunsAsync("svc", 10));
+        var runs = await _env.State.GetLastRunsAsync("monthly", 10);
+        if (before.Day == 1)
+        {
+            Assert.Equal("ok", Assert.Single(runs).Status);
+        }
+        else
+        {
+            Assert.Empty(runs);
+            Assert.Empty(Directory.GetFileSystemEntries(monthly));
+        }
+        Assert.DoesNotContain(_env.Log.Lines, l => l.StartsWith("[Error]"));
+    }
+
     [Fact]
     public async Task The_status_command_fails_on_a_schedule_it_cannot_read_and_passes_once_it_is_put_right()
     {

@@ -553,6 +553,12 @@ public class ConfigTests : IDisposable
         "every 30 minutes, from 08:00 until 18:00 on Monday, Tuesday, Friday")]
     [InlineData("<time>02:00</time><dom>15, 1, 25..28</dom>", "once a day at 02:00, on days 1, 15, 25-28 of the month")]
     [InlineData("<time>23:00</time><eom>true</eom>", "once a day at 23:00, on the last day of the month")]
+    [InlineData("<time>04:00</time><bom>true</bom>", "once a day at 04:00, on the first day of the month")]
+    [InlineData("<bom>FALSE</bom><eom>false</eom>", "once a day")]
+    // Tags for the day of the month that leave a day between them.
+    [InlineData("<bom>true</bom><dom>1,15</dom>", "once a day, on days 1, 15 of the month, on the first day of the month")]
+    [InlineData("<eom>true</eom><dom>15,28..31</dom>", "once a day, on days 15, 28-31 of the month, on the last day of the month")]
+    [InlineData("<bom>true</bom><eom>false</eom>", "once a day, on the first day of the month")]
     [InlineData("<doy>1</doy>", "once a day, on day 1 of the year")]
     [InlineData("<time>16:30</time><dates>2026-12-31|2026-12-24</dates>", "once a day at 16:30, only on 2026-12-24, 2026-12-31")]
     [InlineData("<time>16:30</time><dates>\n2026-12-24\n2026-12-31\n</dates>", "once a day at 16:30, only on 2026-12-24, 2026-12-31")]
@@ -594,8 +600,15 @@ public class ConfigTests : IDisposable
     [InlineData("<not_after>never</not_after>", "<not_after> in <sys> is 'never'")]
     [InlineData("<enabled>yes</enabled>", "<enabled> in <sys> is 'yes'. It is true or false.")]
     [InlineData("<eom>last</eom>", "<eom> in <sys> is 'last'")]
-    [InlineData("<bom>true</bom>", "For the first day of every month write <dom>1</dom>")]
-    [InlineData("<days>Monday</days>", "<sys> holds a <days>, which is not one of its tags. They are interval, time,")]
+    [InlineData("<bom>first</bom>", "<bom> in <sys> is 'first'. It is true or false.")]
+    // Tags for the day of the month that leave no day between them: such a backup would never run.
+    [InlineData("<time>05:00</time><bom>true</bom><eom>true</eom>",
+        "<bom> and <eom> in <sys> leave no day to run on, so the backup would never run. A backup runs only on a day that every tag allows, and no day is both the first and the last of its month.")]
+    [InlineData("<bom>true</bom><dom>15</dom>", "<bom> and <dom> 15 in <sys> leave no day to run on")]
+    [InlineData("<bom>true</bom><dom>15</dom>", "leave <bom> out and list them all in <dom>, such as 1,15.")]
+    [InlineData("<eom>true</eom><dom>1, 15..20</dom>", "<eom> and <dom> 1, 15-20 in <sys> leave no day to run on")]
+    [InlineData("<eom>true</eom><dom>27</dom>", "a month's last day is its 28th at the earliest")]
+    [InlineData("<days>Monday</days>", "<sys> holds a <days>, which is not one of its tags. They are interval, time, until_time, dow, dom, bom, eom,")]
     [InlineData("<interval>3600000</interval><time>22:00</time><until_time>06:00</until_time>", "<until_time> 06:00 in <sys> is not later than <time> 22:00")]
     [InlineData("every day at five", "<sys> holds text that is in no tag")]
     public void A_schedule_that_would_be_misread_is_refused_with_what_to_write_instead(string sys, string said)

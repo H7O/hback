@@ -1,8 +1,8 @@
 # Builds the downloads for every system and publishes them as a GitHub release when a version tag
 # is pushed:
 #
-#   git tag v0.4.0
-#   git push origin v0.4.0
+#   git tag v0.4.1
+#   git push origin v0.4.1
 #
 # The build runs once on each of Linux, Windows and macOS. Each run tests hback on that system,
 # builds that system's downloads, then unpacks them and makes a real backup with them: first by

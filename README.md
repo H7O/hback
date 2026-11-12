@@ -331,6 +331,7 @@ Every time is read by the clock of the machine hback runs on.
 | `until_time` | With `interval`, the time of day it stops at. It has to be later than `time`. | `18:00` |
 | `dow` | Only on these days of the week. | `Monday,Thursday`, with the names in full |
 | `dom` | Only on these days of the month. | `1,15`, or `25..28` for a run of days |
+| `bom` | `true` means only on the first day of the month, the same as `<dom>1</dom>`. | `true` |
 | `eom` | `true` means only on the last day of the month. | `true` |
 | `doy` | Only on these days of the year, counted from 1. | `1,182` |
 | `dates` | Only on these dates. | `2026-12-24`, or `2026-12-24\|2026-12-31` for two |
@@ -410,9 +411,11 @@ One `<sys>` holds one time of day. A backup that should run several times a day 
 
 To see how hback reads a schedule, run `hback status`. It says each backup's schedule in words, such
 as `once a day at 05:00, not before 2026-11-12 16:30`. A tag that `<sys>` doesn't have, or a value
-that can't be read, such as `<time>5am</time>`, is refused. `hback status` and the log then say what
-to write instead, and that backup does not run until it is put right. `hback status` also ends with
-exit code 2 when it finds a problem like that in the configuration, and with 0 when there is none.
+that can't be read, such as `<time>5am</time>`, is refused. So are `dom`, `bom` and `eom` when no day
+fits them all, such as `bom` beside `eom`, because that backup would never run. `hback status` and
+the log then say what is wrong and what to write instead, and that backup does not run until it is
+put right. `hback status` also ends with exit code 2 when it finds a problem like that in the
+configuration, and with 0 when there is none.
 
 The scheduler has tags of its own for trying again after an error. They have no use here, because
 hback tries again by `retries` and `retry_wait_minutes`.
@@ -721,8 +724,8 @@ In place of `linux-x64` goes .NET's name for your system: `win-x64`, `win-arm64`
 A tag that starts with `v` publishes a release:
 
 ```
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.4.1
+git push origin v0.4.1
 ```
 
 The [release workflow](.github/workflows/release.yml) then runs on Linux, Windows and macOS. On each

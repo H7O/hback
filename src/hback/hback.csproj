@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>hback</AssemblyName>
     <RootNamespace>HBack</RootNamespace>
-    <Version>0.4.0</Version>
+    <Version>0.4.1</Version>
     <Authors>Hussein Al Bayati</Authors>
     <Description>Copies the folders you pick to a local folder or an SFTP server, on a schedule, as plain files.</Description>
     <InvariantGlobalization>true</InvariantGlobalization>
@@ -34,7 +34,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Com.H.Threading.Scheduler.DI" Version="11.0.0" />
+    <!-- 11.0.1 brings Com.H.Threading.Scheduler 11.0.1, the first to act on <bom>. -->
+    <PackageReference Include="Com.H.Threading.Scheduler.DI" Version="11.0.1" />
     <PackageReference Include="Com.H.Net.Ssh" Version="11.0.0" />
     <PackageReference Include="Com.H.Data.Common" Version="11.0.0" />
     <PackageReference Include="Com.H.Extensions.Logging.File" Version="1.3.0" />

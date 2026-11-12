@@ -19,7 +19,7 @@ namespace HBack.Config;
 public static partial class ScheduleRules
 {
     /// <summary>The tags hback's page on scheduling describes, in the order it describes them.</summary>
-    public const string Tags = "interval, time, until_time, dow, dom, eom, doy, dates, not_before, not_after, enabled and ignore_log_on_restart";
+    public const string Tags = "interval, time, until_time, dow, dom, bom, eom, doy, dates, not_before, not_after, enabled and ignore_log_on_restart";
 
     /// <summary>
     /// Tags of the scheduler that are let through unread. They do no harm in a backup, and no good:
@@ -89,13 +89,10 @@ public static partial class ScheduleRules
                         throw Wrong("Write a date and a time, such as 2026-11-12 16:30.");
                     break;
 
-                case "eom" or "enabled" or "ignore_log_on_restart":
+                case "bom" or "eom" or "enabled" or "ignore_log_on_restart":
                     if (!value.Equals("true", StringComparison.OrdinalIgnoreCase) && !value.Equals("false", StringComparison.OrdinalIgnoreCase))
                         throw Wrong("It is true or false.");
                     break;
-
-                case "bom":
-                    throw new ConfigException($"Backup '{backup}': the scheduler does not act on <bom> in <sys>. For the first day of every month write <dom>1</dom>.");
 
                 default:
                     if (!LetThrough.Contains(tag))
@@ -108,6 +105,25 @@ public static partial class ScheduleRules
         if (from is not null && until is not null && until <= from)
             throw new ConfigException($"Backup '{backup}': <until_time> {until:hh\\:mm} in <sys> is not later than <time> {from:hh\\:mm}. " +
                 "The two mark out a part of one day, which can't run past midnight.");
+
+        // <dom>, <bom> and <eom> each name days of the month, and a backup runs only on a day all
+        // of them allow. Some mixes allow none. Whoever wrote one meant something else, most likely
+        // "the first and the last day", and would wait for a backup that never comes.
+        if (task.Schedule is not { } schedule) return;
+        var onFirst = schedule.FirstDayOfMonth == true;
+        var onLast = schedule.LastDayOfMonth == true;
+        var listed = schedule.DaysOfMonth?.Distinct().ToList() is { Count: > 0 } ofMonth ? ofMonth : null;
+        ConfigException Never(string tags, string why, string instead = "") => new(
+            $"Backup '{backup}': {tags} in <sys> leave no day to run on, so the backup would never run. " +
+            $"A backup runs only on a day that every tag allows, and {why}.{instead}");
+
+        if (onFirst && onLast)
+            throw Never("<bom> and <eom>", "no day is both the first and the last of its month");
+        if (onFirst && listed is not null && !listed.Contains(1))
+            throw Never($"<bom> and <dom> {Ranges(listed)}", "<bom> allows the 1st only",
+                " For the 1st and other days, leave <bom> out and list them all in <dom>, such as 1,15.");
+        if (onLast && listed is not null && listed.All(n => n < 28))
+            throw Never($"<eom> and <dom> {Ranges(listed)}", "a month's last day is its 28th at the earliest");
     }
 
     /// <summary>"every 30 min", "once a day at 05:00, not before 2026-11-12 16:30": the scheduler's own reading of the entry, in words.</summary>
@@ -124,6 +140,7 @@ public static partial class ScheduleRules
             text += " on " + string.Join(", ", weekdays.Select(day => CultureInfo.InvariantCulture.TextInfo.ToTitleCase(day.ToLowerInvariant())));
         if (schedule.DaysOfMonth?.Distinct().ToList() is { Count: > 0 } ofMonth)
             text += $", on day{(ofMonth.Count > 1 ? "s" : "")} {Ranges(ofMonth)} of the month";
+        if (schedule.FirstDayOfMonth == true) text += ", on the first day of the month";
         if (schedule.LastDayOfMonth == true) text += ", on the last day of the month";
         if (schedule.DaysOfYear?.Distinct().ToList() is { Count: > 0 } ofYear)
             text += $", on day{(ofYear.Count > 1 ? "s" : "")} {Ranges(ofYear)} of the year";
