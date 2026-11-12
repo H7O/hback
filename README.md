@@ -136,8 +136,9 @@ From here on this page writes `hback` for the program. Type its path instead (`C
 `/opt/hback/hback`, `~/hback/hback`) unless you made it reachable from anywhere.
 
 1. In hback's folder, copy `hback.sample.xml` to `hback.xml` and edit it. Under `<sources>` list the
-   folders to back up, and in `<destination>` say where the copies go. The sample is written for
-   Windows. On Linux and macOS write paths the way your system does, such as `/home/me/code` or
+   folders to back up, in `<destination>` say where the copies go, and in `<sys>` say when: every
+   hour in the sample, and [When it runs](#when-it-runs) has the other ways. The sample is written
+   for Windows. On Linux and macOS write paths the way your system does, such as `/home/me/code` or
    `~/Documents/notes`. [Configuration](#configuration) explains every setting.
 
 2. See what it would do, without copying anything:
@@ -200,7 +201,7 @@ simply be typed, and a `%` in a folder name there is written `%25`.
 | Tag | Meaning |
 | --- | --- |
 | `name` | The backup's name, used in commands and logs. Each backup needs its own. |
-| `sys` | When it runs. See below. Leave it out for a backup that only runs with `hback run`. |
+| `sys` | When it runs: every so often, at a time of day, on certain days, from a certain moment. See "When it runs". Leave it out for a backup that only runs with `hback run`. |
 | `sources` | Folders and files to back up, one per line, as full paths. `~` is your home folder. |
 | `exclude` | What to leave out, one pattern per line. See below. |
 | `destination` | A folder (`D:\backups\laptop`), or `sftp://user@host:port/folder`. Use `sftp://user@host/~/folder` for a folder under the login folder. Each backup needs a destination folder of its own. |
@@ -305,17 +306,119 @@ them inside a folder of the other. Otherwise each backup needs a destination fol
 
 ### When it runs
 
-The `<sys>` element belongs to [Com.H.Threading.Scheduler](https://github.com/H7O/Com.H.Threading.Scheduler),
-and everything that scheduler offers works here. The two you are most likely to want:
+A backup's `<sys>` element says when it runs. The element belongs to
+[Com.H.Threading.Scheduler](https://github.com/H7O/Com.H.Threading.Scheduler), which is what tells
+hback that a backup is due. A backup has one `<sys>`. Without one it runs only when you type
+`hback run`.
+
+Three rules explain every schedule:
+
+- **All the tags have to agree.** A backup runs when every tag in its `<sys>` allows it. Each tag you
+  add narrows the schedule, and none widens it.
+- **Without `<interval>`, a backup runs once a day**, on each day the other tags allow. It runs at its
+  `<time>`, or as soon after that as it can. So a backup whose time was missed, because the machine
+  was off or asleep, runs when hback is next running that day. And a backup you have just added or
+  changed runs at once if its time has already passed today.
+- **With `<interval>`, a backup runs again** each time that many milliseconds have gone by since its
+  last run. `<time>` and `<until_time>` then mark out the part of the day in which it does.
+
+Every time is read by the clock of the machine hback runs on.
+
+| Tag | What it does | Written as |
+| --- | --- | --- |
+| `interval` | Runs the backup again every so many milliseconds. | `1800000` |
+| `time` | The time of day a daily backup runs at. With `interval`, the time of day it starts at. | `05:00`, by the 24-hour clock |
+| `until_time` | With `interval`, the time of day it stops at. It has to be later than `time`. | `18:00` |
+| `dow` | Only on these days of the week. | `Monday,Thursday`, with the names in full |
+| `dom` | Only on these days of the month. | `1,15`, or `25..28` for a run of days |
+| `eom` | `true` means only on the last day of the month. | `true` |
+| `doy` | Only on these days of the year, counted from 1. | `1,182` |
+| `dates` | Only on these dates. | `2026-12-24`, or `2026-12-24\|2026-12-31` for two |
+| `not_before` | Not before this moment. | `2026-11-12 16:30` |
+| `not_after` | Not after this moment. | `2026-12-31 23:59` |
+| `enabled` | `false` switches the schedule off. `hback run` still runs the backup. | `false` |
+| `ignore_log_on_restart` | `true` makes hback forget, each time it starts, when the backup last ran. So the backup runs again then, if the other tags allow it. | `true` |
+
+An interval is a number of milliseconds: `60000` is a minute, `300000` is five minutes, `1800000` is
+half an hour, `3600000` is an hour, `21600000` is six hours and `43200000` is twelve.
+
+Here is how the schedules people ask for are written:
 
 ```xml
-<sys><interval>3600000</interval></sys>   <!-- every hour (the number is milliseconds) -->
-<sys><time>01:00</time></sys>             <!-- once a day, at or after 01:00 -->
+<!-- Every hour. -->
+<sys><interval>3600000</interval></sys>
+
+<!-- Every day at 05:00. -->
+<sys><time>05:00</time></sys>
+
+<!-- Every day at 05:00, and the first time today at 16:30. Today is 12 November 2026 here. -->
+<sys>
+  <time>05:00</time>
+  <not_before>2026-11-12 16:30</not_before>
+</sys>
+
+<!-- Every 30 minutes from 08:00 to 18:00, Monday to Friday. -->
+<sys>
+  <interval>1800000</interval>
+  <time>08:00</time>
+  <until_time>18:00</until_time>
+  <dow>Monday,Tuesday,Wednesday,Thursday,Friday</dow>
+</sys>
+
+<!-- Once a week, on Sunday at 03:00. -->
+<sys>
+  <time>03:00</time>
+  <dow>Sunday</dow>
+</sys>
+
+<!-- On the 1st and the 15th of every month at 02:00. -->
+<sys>
+  <time>02:00</time>
+  <dom>1,15</dom>
+</sys>
+
+<!-- On the last day of every month at 23:00. -->
+<sys>
+  <time>23:00</time>
+  <eom>true</eom>
+</sys>
+
+<!-- Once only, on 24 December 2026 at 16:30. -->
+<sys>
+  <time>16:30</time>
+  <dates>2026-12-24</dates>
+</sys>
+
+<!-- Every night at 01:00 until the end of 2026, and not after that. -->
+<sys>
+  <time>01:00</time>
+  <not_after>2026-12-31 23:59</not_after>
+</sys>
+
+<!-- Switched off for now. "hback run" still runs it. -->
+<sys>
+  <time>05:00</time>
+  <enabled>false</enabled>
+</sys>
 ```
 
-A daily backup whose time was missed, because the machine was off or asleep, runs as soon as hback is
-running again that day. A run with nothing to copy only looks at file sizes and times and does not
-contact the destination, so a short interval is cheap.
+The third one follows from the second rule. On the day it names, `not_before` holds the backup back
+until 16:30. Its 05:00 has passed by then, so it runs at once. From the next day on it runs at 05:00.
+Without `not_before`, a backup added in the afternoon would run the moment it is added.
+
+One `<sys>` holds one time of day. A backup that should run several times a day takes an `interval`.
+
+To see how hback reads a schedule, run `hback status`. It says each backup's schedule in words, such
+as `once a day at 05:00, not before 2026-11-12 16:30`. A tag that `<sys>` doesn't have, or a value
+that can't be read, such as `<time>5am</time>`, is refused. `hback status` and the log then say what
+to write instead, and that backup does not run until it is put right. `hback status` also ends with
+exit code 2 when it finds a problem like that in the configuration, and with 0 when there is none.
+
+The scheduler has tags of its own for trying again after an error. They have no use here, because
+hback tries again by `retries` and `retry_wait_minutes`.
+
+A run with nothing to copy only looks at file sizes and times and does not contact the destination,
+so a short interval is cheap.
 
 ### What to exclude
 
@@ -618,14 +721,14 @@ In place of `linux-x64` goes .NET's name for your system: `win-x64`, `win-arm64`
 A tag that starts with `v` publishes a release:
 
 ```
-git tag v0.3.1
-git push origin v0.3.1
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 The [release workflow](.github/workflows/release.yml) then runs on Linux, Windows and macOS. On each
 it runs the tests, builds that system's downloads, and makes a real backup with them, by hand and as a
 service. It publishes the release only if all of that passed. The version comes from the tag. A tag
-with a hyphen in it, such as `v0.4.0-beta.1`, is published as a prerelease.
+with a hyphen in it, such as `v0.5.0-beta.1`, is published as a prerelease.
 
 "Run workflow" on the repository's Actions page does the same without publishing anything.
 

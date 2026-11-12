@@ -267,6 +267,51 @@ public class ServiceTests(ITestOutputHelper output) : IAsyncLifetime
         Assert.Empty(Directory.GetFileSystemEntries(later));
     }
 
+    /// <summary>
+    /// "Every day at 05:00, and the first time today at 16:30", as the README writes it: a daily
+    /// time that has passed, and a moment before which the backup may not run. Nothing in hback
+    /// was made for this. It follows from two rules of the scheduler, and this holds them to it.
+    /// </summary>
+    [Fact]
+    public async Task A_daily_backup_whose_time_has_passed_waits_for_the_moment_it_may_not_run_before()
+    {
+        _env.Write("a.txt", "alpha");
+        // Written to the second, so the moment is the start of that second.
+        var soon = DateTime.Now.AddSeconds(6);
+        var notBefore = new DateTime(soon.Year, soon.Month, soon.Day, soon.Hour, soon.Minute, soon.Second, DateTimeKind.Local);
+        WriteConfig($"<sys><time>00:00</time><not_before>{notBefore:yyyy-MM-dd HH:mm:ss}</not_before></sys>");
+
+        using var host = Build();
+        await host.StartAsync();
+        try
+        {
+            await WaitForFileAsync("a.txt", "alpha");
+        }
+        finally
+        {
+            await host.StopAsync();
+        }
+
+        // The scheduler looks every second. Left to its daily time alone, which passed at midnight,
+        // the backup would have started as soon as hback did. It ran once, and not before the moment.
+        var run = Assert.Single(await _env.State.GetLastRunsAsync("svc", 10));
+        Assert.True(run.StartedUtc.AddSeconds(1) > notBefore.ToUniversalTime(),
+            $"The backup started at {run.StartedUtc:HH:mm:ss.fff} UTC, before {notBefore.ToUniversalTime():HH:mm:ss} UTC.");
+    }
+
+    [Fact]
+    public async Task The_status_command_fails_on_a_schedule_it_cannot_read_and_passes_once_it_is_put_right()
+    {
+        string[] status = ["status", "--config", _env.Paths.ConfigPath, "--data", Path.Combine(_env.Root, "status-data")];
+
+        // Whoever has just written the configuration sees the mistake from the exit code alone.
+        WriteConfig("<sys><time>5am</time></sys>");
+        Assert.Equal(2, await Cli.RunAsync(status));
+
+        WriteConfig("<sys><time>05:00</time></sys>");
+        Assert.Equal(0, await Cli.RunAsync(status));
+    }
+
     [Fact]
     public async Task A_configuration_that_is_not_valid_XML_stops_the_service_from_starting()
     {

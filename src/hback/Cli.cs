@@ -43,6 +43,10 @@ public static class Cli
           --data <folder>           Where hback keeps its database and logs. Default: the "data"
                                     folder beside the program. HBACK_DATA sets it too.
           --verbose                 Log more.
+
+        When a backup runs is set by the <sys> element of its entry in hback.xml: every so often,
+        at a time of day, on certain days, from a certain moment. README.md, beside this program,
+        lists what <sys> can hold under "When it runs". "hback status" says each schedule in words.
         """;
 
     private sealed class UsageException(string message) : Exception(message);
@@ -232,15 +236,20 @@ public static class Cli
     private static async Task<int> ShowStatusAsync(AppPaths paths, Options options, StateStore state)
     {
         var entries = ConfigLoader.Load(paths.ConfigPath);
-        foreach (var error in entries.Where(e => e.Error is not null))
-            Console.WriteLine($"Configuration problem: {error.Error}");
+        var problems = entries.Where(e => e.Error is not null).ToList();
+        foreach (var problem in problems)
+            Console.WriteLine($"Configuration problem: {problem.Error}");
+        // A problem also ends the command with the exit code "run" gives for one. Whoever checks a
+        // configuration they have just written, a script or an AI agent, then sees it without
+        // having to read the words. The backups that could be read are still shown.
+        var exitCode = problems.Count > 0 ? 2 : 0;
 
         var jobs = entries.Where(e => e.Job is not null).Select(e => e.Job!).ToList();
         if (options.Names.Count > 0) jobs = Select(jobs, options.Names);
         if (jobs.Count == 0)
         {
-            Console.WriteLine($"No backups are defined in {paths.ConfigPath}.");
-            return 0;
+            if (problems.Count == 0) Console.WriteLine($"No backups are defined in {paths.ConfigPath}.");
+            return exitCode;
         }
 
         var detailed = options.Names.Count > 0;
@@ -290,7 +299,7 @@ public static class Cli
             }
         }
         Console.WriteLine();
-        return 0;
+        return exitCode;
     }
 
     private static bool IsRunning(AppPaths paths, DestinationSpec destination)

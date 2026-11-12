@@ -394,7 +394,7 @@ public class ConfigTests : IDisposable
         Assert.Equal(destination, Assert.Single(projects.Destinations).Root);
         Assert.Equal(7, projects.Destinations[0].KeepHistoryDays);
         Assert.True(projects.Scheduled);
-        Assert.Equal("every 30 min", projects.ScheduleText);
+        Assert.Equal("every 30 minutes", projects.ScheduleText);
 
         var byHand = entries[1].Job!;
         Assert.False(byHand.Scheduled);
@@ -418,7 +418,7 @@ public class ConfigTests : IDisposable
         Assert.True(destination.IsSftp);
         Assert.Equal("/backups/laptop", destination.Root);
         Assert.NotNull(destination.PrivateKey);
-        Assert.Equal("every 60 min", job.ScheduleText);
+        Assert.Equal("every hour", job.ScheduleText);
     }
 
     [SkippableFact]
@@ -504,12 +504,8 @@ public class ConfigTests : IDisposable
             return $"<hback><backup>{rest}{example}</backup></hback>";
         }
 
-        // One example shows two schedules, one to a line. Each is a schedule by itself.
-        var examples = ReadmeExamples()
-            .SelectMany(example => Regex.Matches(example, "<sys>").Count > 1
-                ? example.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                : [example])
-            .ToList();
+        // The example that lists one schedule after another has a test of its own.
+        var examples = ReadmeExamples().Where(example => Regex.Matches(example, "<sys>").Count <= 1).ToList();
 
         var jobs = new List<BackupJob>();
         foreach (var (example, i) in examples.Select((example, i) => (example, i)))
@@ -536,6 +532,126 @@ public class ConfigTests : IDisposable
         Assert.Contains(jobs, j => j.Destinations.Select(d => d.Root).SequenceEqual([@"E:\backups\laptop", "/backups/laptop", "/backups/laptop"]));
         Assert.Contains(jobs, j => j.Destinations.Select(d => (d.Root, d.Name, d.KeepHistoryDays))
             .SequenceEqual([("/backups/laptop", null, 30), (@"E:\backups\laptop", "usb", 365)]));
+    }
+
+    private ConfigEntry WithSchedule(string sys) => Assert.Single(Load($"""
+        <hback>
+          <backup>
+            <name>timed</name>
+            <sys>{sys}</sys>
+            <sources>{Path.Combine(_folder, "code")}</sources>
+            <destination>{Path.Combine(_folder, "d")}</destination>
+          </backup>
+        </hback>
+        """));
+
+    [Theory]
+    [InlineData("<interval>1800000</interval>", "every 30 minutes")]
+    [InlineData("<time>05:00</time>", "once a day at 05:00")]
+    [InlineData("<time>5:00</time><not_before>2026-11-12 16:30</not_before>", "once a day at 05:00, not before 2026-11-12 16:30")]
+    [InlineData("<interval>1800000</interval><time>08:00</time><until_time>18:00</until_time><dow>monday, Tuesday,FRIDAY</dow>",
+        "every 30 minutes, from 08:00 until 18:00 on Monday, Tuesday, Friday")]
+    [InlineData("<time>02:00</time><dom>15, 1, 25..28</dom>", "once a day at 02:00, on days 1, 15, 25-28 of the month")]
+    [InlineData("<time>23:00</time><eom>true</eom>", "once a day at 23:00, on the last day of the month")]
+    [InlineData("<doy>1</doy>", "once a day, on day 1 of the year")]
+    [InlineData("<time>16:30</time><dates>2026-12-31|2026-12-24</dates>", "once a day at 16:30, only on 2026-12-24, 2026-12-31")]
+    [InlineData("<time>16:30</time><dates>\n2026-12-24\n2026-12-31\n</dates>", "once a day at 16:30, only on 2026-12-24, 2026-12-31")]
+    [InlineData("<time>01:00</time><not_after>2026-12-31 23:59</not_after><ignore_log_on_restart>true</ignore_log_on_restart>",
+        "once a day at 01:00, not after 2026-12-31 23:59, and again each time hback starts")]
+    [InlineData("<time>05:00</time><enabled>false</enabled>", "once a day at 05:00 (disabled)")]
+    // The scheduler's own tags for a failed run are let through. hback tries again by itself.
+    [InlineData("<interval>60000</interval><sleep_on_error>1000</sleep_on_error><retry_attempts_on_error>3</retry_attempts_on_error>", "every minute")]
+    public void A_schedule_is_said_back_in_words(string sys, string words)
+    {
+        var entry = WithSchedule(sys);
+
+        Assert.Null(entry.Error);
+        Assert.True(entry.Job!.Scheduled);
+        Assert.Equal(words, entry.Job.ScheduleText);
+    }
+
+    /// <summary>
+    /// Each of these the scheduler takes without a word and then does something else: it leaves the
+    /// value out, or ignores the tag. "5am" would run the backup at midnight, "Mon" never, and
+    /// "30m" once a day.
+    /// </summary>
+    [Theory]
+    [InlineData("<time>5am</time>", "<time> in <sys> is '5am'. Write one time of day")]
+    [InlineData("<time>5</time>", "<time> in <sys> is '5'")]
+    [InlineData("<time>05:00,17:00</time>", "Write one time of day")]
+    [InlineData("<time>24:30</time>", "<time> in <sys> is '24:30'")]
+    [InlineData("<interval>3600000</interval><until_time>6pm</until_time>", "<until_time> in <sys> is '6pm'")]
+    [InlineData("<interval>30m</interval>", "<interval> in <sys> is '30m'. It is a whole number of milliseconds")]
+    [InlineData("<interval>0</interval>", "<interval> in <sys> is '0'")]
+    [InlineData("<interval>4000000000</interval>", "<interval> in <sys> is '4000000000'")]
+    [InlineData("<time>05:00</time><dow>Mon,Thu</dow>", "Write the days of the week in full")]
+    [InlineData("<dom>32</dom>", "<dom> in <sys> is '32'. Write days of the month from 1 to 31")]
+    [InlineData("<dom>first</dom>", "<dom> in <sys> is 'first'")]
+    [InlineData("<doy>367</doy>", "Write days of the year from 1 to 366")]
+    [InlineData("<dates>next friday</dates>", "Write each date as 2026-12-24")]
+    [InlineData("<dates>2026-12-24|soon</dates>", "Write each date as 2026-12-24")]
+    [InlineData("<not_before>tomorrow at four</not_before>", "<not_before> in <sys> is 'tomorrow at four'. Write a date and a time")]
+    [InlineData("<not_after>never</not_after>", "<not_after> in <sys> is 'never'")]
+    [InlineData("<enabled>yes</enabled>", "<enabled> in <sys> is 'yes'. It is true or false.")]
+    [InlineData("<eom>last</eom>", "<eom> in <sys> is 'last'")]
+    [InlineData("<bom>true</bom>", "For the first day of every month write <dom>1</dom>")]
+    [InlineData("<days>Monday</days>", "<sys> holds a <days>, which is not one of its tags. They are interval, time,")]
+    [InlineData("<interval>3600000</interval><time>22:00</time><until_time>06:00</until_time>", "<until_time> 06:00 in <sys> is not later than <time> 22:00")]
+    [InlineData("every day at five", "<sys> holds text that is in no tag")]
+    public void A_schedule_that_would_be_misread_is_refused_with_what_to_write_instead(string sys, string said)
+    {
+        var entry = WithSchedule(sys);
+
+        Assert.Null(entry.Job);
+        Assert.StartsWith("Backup 'timed': ", entry.Error);
+        Assert.Contains(said, entry.Error);
+    }
+
+    [Fact]
+    public void A_second_schedule_which_would_never_be_acted_on_is_refused()
+    {
+        string Backup(string name, string body) =>
+            $"<backup><name>{name}</name>{body}<sources>{Path.Combine(_folder, "code")}</sources><destination>{Path.Combine(_folder, name)}</destination></backup>";
+        var entries = Load($"""
+            <hback>
+              {Backup("twice", "<sys><time>05:00</time></sys><sys><time>16:30</time><dates>2026-11-12</dates></sys>")}
+              {Backup("loose", "daily <sys><time>05:00</time></sys>")}
+              {Backup("once", "<sys><time>05:00</time></sys>")}
+            </hback>
+            """);
+
+        Assert.Contains("Backup 'twice' holds something that is not read: a second <sys>", entries[0].Error);
+        Assert.Contains("Backup 'loose' holds something that is not read", entries[1].Error);
+        Assert.Null(entries[2].Error);
+    }
+
+    /// <summary>
+    /// The README writes out the schedules people ask for, each under a line that says it in words.
+    /// Whoever copies one, a person or an AI agent, gets what the line says only if this holds.
+    /// </summary>
+    [Fact]
+    public void The_schedules_in_the_readme_are_read_as_what_it_says_they_are()
+    {
+        var schedules = Regex.Matches(ReadmeExamples().Single(example => Regex.Matches(example, "<sys>").Count > 1),
+                @"<!--\s*(?<says>.*?)\s*-->\s*(?<sys><sys>.*?</sys>)", RegexOptions.Singleline)
+            .Select(m => (Says: m.Groups["says"].Value, Read: WithSchedule(Regex.Match(m.Groups["sys"].Value, "<sys>(.*)</sys>", RegexOptions.Singleline).Groups[1].Value)))
+            .ToList();
+
+        Assert.All(schedules, schedule => Assert.True(schedule.Read.Error is null, $"{schedule.Says}\n{schedule.Read.Error}"));
+        Assert.Equal(
+            [
+                ("Every hour.", "every hour"),
+                ("Every day at 05:00.", "once a day at 05:00"),
+                ("Every day at 05:00, and the first time today at 16:30. Today is 12 November 2026 here.", "once a day at 05:00, not before 2026-11-12 16:30"),
+                ("Every 30 minutes from 08:00 to 18:00, Monday to Friday.", "every 30 minutes, from 08:00 until 18:00 on Monday, Tuesday, Wednesday, Thursday, Friday"),
+                ("Once a week, on Sunday at 03:00.", "once a day at 03:00 on Sunday"),
+                ("On the 1st and the 15th of every month at 02:00.", "once a day at 02:00, on days 1, 15 of the month"),
+                ("On the last day of every month at 23:00.", "once a day at 23:00, on the last day of the month"),
+                ("Once only, on 24 December 2026 at 16:30.", "once a day at 16:30, only on 2026-12-24"),
+                ("Every night at 01:00 until the end of 2026, and not after that.", "once a day at 01:00, not after 2026-12-31 23:59"),
+                ("Switched off for now. \"hback run\" still runs it.", "once a day at 05:00 (disabled)"),
+            ],
+            schedules.Select(schedule => (schedule.Says, schedule.Read.Job!.ScheduleText)));
     }
 
     [Fact]

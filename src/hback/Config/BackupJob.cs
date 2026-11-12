@@ -70,6 +70,15 @@ public sealed record BackupJob
 
         var name = Get("name") ?? throw new ConfigException("A backup has no <name>.");
 
+        // The scheduler reads the first <sys> of an entry and passes over any other, so a second
+        // schedule would never be acted on, and nobody would be told. It can't be seen from here
+        // either: the reader doesn't hand it over. But its text is in the entry's text and in no
+        // element that was handed over, and that much can be counted.
+        if (HasTextOfItsOwn(task))
+            throw new ConfigException($"Backup '{name}' holds something that is not read: a second <sys>, or text that is in no tag. " +
+                "A backup has one <sys>, and every rule of its schedule goes in that one.");
+        ScheduleRules.Check(task, name);
+
         var sources = new List<string>();
         foreach (var line in PathText.Lines(Get("sources")))
         {
@@ -100,7 +109,7 @@ public sealed record BackupJob
             Retries = Number(Get("retries"), 3, 0, 100, name, "retries"),
             RetryWaitMinutes = Number(Get("retry_wait_minutes"), 5, 0, 1440, name, "retry_wait_minutes"),
             Scheduled = task.Schedule is not null,
-            ScheduleText = DescribeSchedule(task.Schedule),
+            ScheduleText = ScheduleRules.Describe(task.Schedule),
         };
     }
 
@@ -195,25 +204,10 @@ public sealed record BackupJob
     /// them, the rest are its own.
     /// </para>
     /// </summary>
-    private static bool HasTextOfItsOwn(IHTaskItem element)
+    internal static bool HasTextOfItsOwn(IHTaskItem element)
     {
         static int Letters(string? text) => (text ?? "").Count(c => !char.IsWhiteSpace(c));
         return Letters(element.RawValue) > (element.Children ?? []).Sum(child => Letters(child?.RawValue));
-    }
-
-    /// <summary>"every 30 min", "once a day at 01:00", worded from the scheduler's own reading of the entry.</summary>
-    private static string DescribeSchedule(IHTaskControlProperties? schedule)
-    {
-        if (schedule is null) return "none (runs only with 'hback run')";
-        var text = schedule.Interval is { } ms
-            ? "every " + Engine.Text.Duration(TimeSpan.FromMilliseconds(ms))
-            : "once a day";
-        if (schedule.Time is { } time)
-            text += schedule.Interval is null ? $" at {time:hh\\:mm}" : $", from {time:hh\\:mm}";
-        if (schedule.UntilTime is { } until) text += $" until {until:hh\\:mm}";
-        if (schedule.DaysOfWeek is { } days) text += " on " + string.Join(", ", days);
-        if (!schedule.Enabled) text += " (disabled)";
-        return text;
     }
 
     /// <summary>Paths differ by letter case on Linux, and don't on Windows and macOS.</summary>

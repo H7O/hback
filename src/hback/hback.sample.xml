@@ -17,9 +17,16 @@
     <name>projects</name>
 
     <!-- When it runs. This is Com.H.Threading.Scheduler's <sys> element.
-         <interval> is in milliseconds: 3600000 is every hour.
-         Or run once a day with <time>01:00</time> instead. If the machine was off at that time,
-         the backup runs when hback next starts that day.
+           <interval>3600000</interval>    every hour: the number is milliseconds
+           <time>05:00</time>              once a day at 05:00 instead. If the machine was off
+                                           then, the backup runs when hback next starts that day.
+         More tags narrow either one down, and all the tags in <sys> have to agree:
+           <dow>Monday,Thursday</dow>                    only on these days of the week
+           <dom>1,15</dom>                               only on these days of the month
+           <until_time>18:00</until_time>                with an interval: from <time> until then
+           <not_before>2026-11-12 16:30</not_before>     not before this moment
+         "When it runs" in README.md has every tag, with the schedules people ask for written out.
+         "hback status" says a schedule back in words, and says so if it can't read one.
          Leave <sys> out for a backup that only runs when you type "hback run projects". -->
     <sys>
       <interval>3600000</interval>
