@@ -71,10 +71,10 @@ cat > "$home/hback.xml" << EOF
 <hback>
   <backup>
     <name>try</name>
-    <sources>
+    <sources><![CDATA[
       $(native "$work/source")
-    </sources>
-    <destination>$(native "$work/destination")</destination>
+    ]]></sources>
+    <destination><![CDATA[$(native "$work/destination")]]></destination>
   </backup>
 </hback>
 EOF

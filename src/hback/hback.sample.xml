@@ -2,6 +2,14 @@
 <!--
   Copy this file to hback.xml and edit it. Each <backup> is one backup.
   hback re-reads the file while it runs, and a backup you edit runs straight away.
+
+  Paths, patterns, addresses and passwords are written between <![CDATA[ and ]]> here.
+  hback reads what is between those two marks exactly as you wrote it. So an & or a < in a path
+  or a password needs nothing done to it, and a backslash is one backslash. That is the way to
+  write values of this kind, because they are the ones likely to hold such a character.
+
+  hback does not ask for CDATA anywhere. The names and numbers here are written without it, and
+  any value can be. Without it an & has to be written &amp; and a < has to be written &lt;.
 -->
 <hback>
 
@@ -18,10 +26,10 @@
     </sys>
 
     <!-- What to back up: one folder or file per line. "~" is your home folder. -->
-    <sources>
+    <sources><![CDATA[
       C:\code
       ~\Documents\notes
-    </sources>
+    ]]></sources>
 
     <!-- What to leave out, one pattern per line, written like a .gitignore line:
            node_modules     that name, in any folder
@@ -31,7 +39,7 @@
            C:/code/old/     a full path
          hback does not read your .gitignore files. They exclude things a backup should keep,
          like .env files and local settings. -->
-    <exclude>
+    <exclude><![CDATA[
       node_modules/
       bin/
       obj/
@@ -39,7 +47,7 @@
       __pycache__/
       .venv/
       *.tmp
-    </exclude>
+    ]]></exclude>
 
     <!-- Where it goes. Give every backup a folder of its own.
            A folder:        D:\backups\laptop        (it must exist, hback won't create it)
@@ -47,12 +55,12 @@
                             sftp://user@host/~/backups/laptop    ("~" is the login folder)
          To send the same files to more than one place, repeat <destination>, or list the places
          one per line in <destinations>, the way <sources> lists folders. -->
-    <destination>sftp://hussein@backup.example.com:22/backups/laptop</destination>
+    <destination><![CDATA[sftp://hussein@backup.example.com:22/backups/laptop]]></destination>
 
     <!-- For SFTP, a private key (OpenSSH or PEM format), with <passphrase> if it has one... -->
-    <private_key>~\.ssh\id_ed25519</private_key>
+    <private_key><![CDATA[~\.ssh\id_ed25519]]></private_key>
     <!-- ...or a password.
-    <password>secret</password> -->
+    <password><![CDATA[secret]]></password> -->
 
     <!-- Optional. The server's host key, as "ssh-keygen -lf" prints it. Without it, hback remembers
          the key the server shows on the first connection and refuses any other key later. -->
@@ -74,9 +82,9 @@
 
     <!-- Optional. Other names or places for hback's three folders, inside the destination.
          "." as the current folder puts the files straight into the destination folder. -->
-    <!-- <current_folder>current</current_folder>
-    <history_folder>history</history_folder>
-    <partial_folder>partial</partial_folder> -->
+    <!-- <current_folder><![CDATA[current]]></current_folder>
+    <history_folder><![CDATA[history]]></history_folder>
+    <partial_folder><![CDATA[partial]]></partial_folder> -->
   </backup>
 
   <!--
@@ -97,19 +105,19 @@
     <sys>
       <interval>300000</interval>
     </sys>
-    <sources>
+    <sources><![CDATA[
       C:\deploy\site
-    </sources>
+    ]]></sources>
     <source_path>none</source_path>
-    <current_folder>.</current_folder>
+    <current_folder><![CDATA[.]]></current_folder>
     <keep_history_days>7</keep_history_days>
-    <private_key>~\.ssh\id_ed25519</private_key>
+    <private_key><![CDATA[~\.ssh\id_ed25519]]></private_key>
     <destinations>
-      <destination>\\web1\apps\site</destination>
-      <destination>sftp://deploy@web2.example.com/var/www/site</destination>
+      <destination><![CDATA[\\web1\apps\site]]></destination>
+      <destination><![CDATA[sftp://deploy@web2.example.com/var/www/site]]></destination>
       <destination>
         <name>archive</name>
-        <path>sftp://deploy@archive.example.com/srv/sites/site</path>
+        <path><![CDATA[sftp://deploy@archive.example.com/srv/sites/site]]></path>
         <keep_history_days>365</keep_history_days>
       </destination>
     </destinations>

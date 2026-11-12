@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+using System.Xml.Linq;
 using HBack.Config;
 using HBack.Engine;
 using HBack.Scan;
@@ -207,6 +209,8 @@ public class DestinationSpecTests
     [InlineData("sftp://me@host/~", ".")]
     [InlineData("sftp://me@host/~/backups/laptop", "backups/laptop")]
     [InlineData("sftp://me@host/my%20backups", "/my backups")]
+    [InlineData("sftp://me@host/my backups/R&D", "/my backups/R&D")]
+    [InlineData("sftp://me@host/100%25/done", "/100%/done")]
     public void The_remote_folder_is_absolute_or_under_the_login_folder(string destination, string root)
     {
         var d = Parse(destination, ("password", "pw"));
@@ -415,6 +419,181 @@ public class ConfigTests : IDisposable
         Assert.Equal("/backups/laptop", destination.Root);
         Assert.NotNull(destination.PrivateKey);
         Assert.Equal("every 60 min", job.ScheduleText);
+    }
+
+    [SkippableFact]
+    public void The_second_backup_of_the_sample_is_valid_once_its_comment_marks_are_taken_away()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "The sample is written with Windows paths.");
+        var sample = Shipped(AppPaths.SampleFileName);
+        var uncommented = Regex.Replace(sample, @"<!--\s*(<backup>.*?</backup>)\s*-->", "$1", RegexOptions.Singleline);
+        Assert.NotEqual(sample, uncommented);
+
+        var entries = Load(uncommented);
+
+        Assert.Equal(2, entries.Count);
+        Assert.All(entries, e => Assert.Null(e.Error));
+        var site = entries[1].Job!;
+        Assert.Equal("site", site.Name);
+        Assert.Equal([@"C:\deploy\site"], site.Sources);
+        Assert.Equal([@"\\web1\apps\site", "/var/www/site", "/srv/sites/site"], site.Destinations.Select(d => d.Root));
+        Assert.Equal([null, null, "archive"], site.Destinations.Select(d => d.Name));
+        Assert.Equal([7, 7, 365], site.Destinations.Select(d => d.KeepHistoryDays));
+        Assert.All(site.Destinations, d => Assert.Equal(("", SourcePathStyle.None), (d.CurrentFolder, d.SourcePath)));
+        Assert.All(site.Destinations.Skip(1), d => Assert.NotNull(d.PrivateKey));
+    }
+
+    private static string Shipped(string fileName) => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, fileName));
+
+    /// <summary>The examples of hback.xml in the README, which is every XML example but the launchd file.</summary>
+    private static List<string> ReadmeExamples()
+    {
+        var examples = Regex.Matches(Shipped("README.md"), @"```xml\r?\n(.*?)```", RegexOptions.Singleline)
+            .Select(m => m.Groups[1].Value)
+            .Where(example => !example.Contains("<plist"))
+            .ToList();
+        // Fewer would mean the examples are no longer found, and the tests that use them check nothing.
+        Assert.True(examples.Count >= 7, $"Only {examples.Count} examples were found in the README.");
+        return examples;
+    }
+
+    /// <summary>
+    /// People copy these examples closely, and so do the AI agents they send to set hback up. So
+    /// the examples show the way of writing a value that never needs anything done to it: paths,
+    /// patterns, addresses and passwords, which are the values likely to hold a character that XML
+    /// wants written another way, go in CDATA. This fails when an example is added without it.
+    /// <para>
+    /// A name is left as it is, on purpose. It shows the reader that CDATA is a recommendation for
+    /// values of that kind and not something hback asks for.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void The_examples_put_paths_and_passwords_in_CDATA_and_leave_names_plain()
+    {
+        var writtenPlainly = new Regex(@"<(sources|exclude|destination|destinations|path|private_key|passphrase|password|" +
+            @"current_folder|history_folder|partial_folder)>[^<]*[^<\s][^<]*</\1>");
+        Assert.Matches(writtenPlainly, "<password>secret</password>");
+        Assert.DoesNotMatch(writtenPlainly, "<password><![CDATA[secret]]></password>");
+
+        // The text as it stands, so that the settings a comment holds back are looked at as well.
+        var examples = ReadmeExamples().Append(Shipped(AppPaths.SampleFileName)).ToList();
+
+        Assert.Empty(examples.SelectMany(example => writtenPlainly.Matches(example).Select(m => m.Value)));
+        Assert.Empty(examples.SelectMany(example => Regex.Matches(example, @"<name><!\[CDATA\[.*?</name>").Select(m => m.Value)));
+        Assert.Contains(examples, example => example.Contains("<name>projects</name>"));
+    }
+
+    [SkippableFact]
+    public void Every_example_in_the_readme_is_a_configuration_hback_reads()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "The examples are written with Windows paths.");
+        string At(string name) => Path.Combine(_folder, name);
+
+        // An example that shows a part of a backup gets what a backup can't do without.
+        string Whole(string example, int number)
+        {
+            if (example.Contains("<hback>")) return example;
+            if (example.Contains("<backup>")) return $"<hback>{example}</hback>";
+
+            var shown = XElement.Parse($"<backup>{example}</backup>");
+            var rest = "";
+            if (shown.Element("name") is null) rest += $"<name>example {number}</name>";
+            if (shown.Element("sources") is null) rest += $"<sources>{At("code")}</sources>";
+            if (shown.Element("destination") is null && shown.Element("destinations") is null) rest += $"<destination>{At("backups")}</destination>";
+            if (shown.Element("private_key") is null && shown.Element("password") is null) rest += "<password>pw</password>";
+            return $"<hback><backup>{rest}{example}</backup></hback>";
+        }
+
+        // One example shows two schedules, one to a line. Each is a schedule by itself.
+        var examples = ReadmeExamples()
+            .SelectMany(example => Regex.Matches(example, "<sys>").Count > 1
+                ? example.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                : [example])
+            .ToList();
+
+        var jobs = new List<BackupJob>();
+        foreach (var (example, i) in examples.Select((example, i) => (example, i)))
+        {
+            var entries = Load(Whole(example, i + 1));
+            Assert.NotEmpty(entries);
+            Assert.All(entries, e => Assert.True(e.Error is null, $"{e.Error}\n{example}"));
+            jobs.AddRange(entries.Select(e => e.Job!));
+            if (example.Contains("<sys>"))
+                Assert.All(entries, e => Assert.True(e.Job!.Scheduled, example));
+        }
+
+        // The two whole backups say what the page says they do.
+        var projects = jobs.Single(j => j.Name == "projects");
+        Assert.Equal([@"C:\code", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @"Documents\notes")], projects.Sources);
+        Assert.Equal(["node_modules/", "bin/", "obj/"], projects.Excludes);
+        Assert.Equal("/backups/laptop", Assert.Single(projects.Destinations).Root);
+
+        var site = jobs.Single(j => j.Name == "site");
+        Assert.Equal([@"\\web1\apps\site", "/var/www/site", "/var/www/site"], site.Destinations.Select(d => d.Root));
+        Assert.All(site.Destinations, d => Assert.Equal(("", SourcePathStyle.None, 7), (d.CurrentFolder, d.SourcePath, d.KeepHistoryDays)));
+
+        // And the two ways of writing a list both give every destination in it.
+        Assert.Contains(jobs, j => j.Destinations.Select(d => d.Root).SequenceEqual([@"E:\backups\laptop", "/backups/laptop", "/backups/laptop"]));
+        Assert.Contains(jobs, j => j.Destinations.Select(d => (d.Root, d.Name, d.KeepHistoryDays))
+            .SequenceEqual([("/backups/laptop", null, 30), (@"E:\backups\laptop", "usb", 365)]));
+    }
+
+    [Fact]
+    public void What_is_written_in_CDATA_is_taken_just_as_it_stands()
+    {
+        string At(string name) => Path.Combine(_folder, name);
+        // Every value here holds something that plain XML would want written another way.
+        var entries = Load($"""
+            <?xml version="1.0" encoding="utf-8"?>
+            <hback>
+              <backup>
+                <name><![CDATA[R&D <drafts>]]></name>
+                <sources><![CDATA[
+                  {At("R&D")}
+                  # a comment, with a < in it
+                  {At("Q&A")}
+                ]]></sources>
+                <exclude><![CDATA[
+                  *.tmp
+                  <old>/
+                  this&that
+                ]]></exclude>
+                <password><![CDATA[p&ss<w>rd "one" 'two' &amp; C:\\x]]></password>
+                <destinations><![CDATA[
+                  {At("one & two")}
+                  sftp://me@host/srv/R&D
+                ]]></destinations>
+              </backup>
+              <backup>
+                <name><![CDATA[blocks]]></name>
+                <sources><![CDATA[{At("code")}]]></sources>
+                <destinations>
+                  <destination><![CDATA[{At("site & more")}]]></destination>
+                  <destination>
+                    <name><![CDATA[second & last]]></name>
+                    <path><![CDATA[{At("7 & days")}]]></path>
+                    <current_folder><![CDATA[files & folders]]></current_folder>
+                    <keep_history_days>7</keep_history_days>
+                  </destination>
+                </destinations>
+              </backup>
+            </hback>
+            """);
+
+        Assert.All(entries, e => Assert.Null(e.Error));
+        var lines = entries[0].Job!;
+        Assert.Equal("R&D <drafts>", lines.Name);
+        Assert.Equal([At("R&D"), At("Q&A")], lines.Sources);
+        Assert.Equal(["*.tmp", "<old>/", "this&that"], lines.Excludes);
+        Assert.Equal([At("one & two"), "/srv/R&D"], lines.Destinations.Select(d => d.Root));
+        // Nothing is read a second time: what looks like an escape inside CDATA is not one.
+        Assert.Equal("""p&ss<w>rd "one" 'two' &amp; C:\\x""", lines.Destinations[1].Password);
+
+        var blocks = entries[1].Job!.Destinations;
+        Assert.Equal([At("site & more"), At("7 & days")], blocks.Select(d => d.Root));
+        Assert.Equal((null, "second & last"), (blocks[0].Name, blocks[1].Name));
+        Assert.Equal(("current", "files & folders"), (blocks[0].CurrentFolder, blocks[1].CurrentFolder));
+        Assert.Equal([30, 7], blocks.Select(d => d.KeepHistoryDays));
     }
 
     [Fact]

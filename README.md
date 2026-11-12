@@ -170,20 +170,32 @@ you edit runs straight away.
     <sys>
       <interval>3600000</interval>
     </sys>
-    <sources>
+    <sources><![CDATA[
       C:\code
       ~\Documents\notes
-    </sources>
-    <exclude>
+    ]]></sources>
+    <exclude><![CDATA[
       node_modules/
       bin/
       obj/
-    </exclude>
-    <destination>sftp://me@backup.example.com:22/backups/laptop</destination>
-    <private_key>~\.ssh\id_ed25519</private_key>
+    ]]></exclude>
+    <destination><![CDATA[sftp://me@backup.example.com:22/backups/laptop]]></destination>
+    <private_key><![CDATA[~\.ssh\id_ed25519]]></private_key>
   </backup>
 </hback>
 ```
+
+The paths, patterns, addresses and passwords on this page are written between `<![CDATA[` and `]]>`.
+hback reads what is between those two marks exactly as it is written. So a `&`, a `<` or a `>` in a
+path or a password needs nothing done to it, and a backslash is one backslash. That is the way to
+write values of this kind, because they are the ones likely to hold such a character.
+
+hback does not ask for CDATA anywhere. The names, numbers and times on this page are written without
+it, and any value can be. A value without CDATA follows the rules of XML: `&` has to be written
+`&amp;`, and `<` has to be written `&lt;`. The one thing CDATA can't hold is `]]>` itself.
+
+An `sftp://` address is a URL whichever way it is written. `%20` in it is a space, though a space can
+simply be typed, and a `%` in a folder name there is written `%25`.
 
 | Tag | Meaning |
 | --- | --- |
@@ -206,20 +218,18 @@ you edit runs straight away.
 A local destination folder must exist already. hback doesn't create it, so that an unplugged USB
 drive or an unmounted share is never mistaken for an empty destination.
 
-A path with `&` in it must be written with `&amp;`, because this is XML.
-
 ### Several destinations
 
 A backup can go to more than one place. List them one per line in `<destinations>`, the way
 `<sources>` lists folders:
 
 ```xml
-<private_key>~\.ssh\id_ed25519</private_key>
-<destinations>
+<private_key><![CDATA[~\.ssh\id_ed25519]]></private_key>
+<destinations><![CDATA[
   E:\backups\laptop
   sftp://me@backup.example.com/backups/laptop
   sftp://me@second.example.com/backups/laptop
-</destinations>
+]]></destinations>
 ```
 
 Every destination gets all the files. hback serves them one after the other, in the order they are
@@ -233,12 +243,12 @@ element, with its address in `<path>` and its settings beside it. The others are
 `<destination>` elements too, because a list holds either lines or elements, not both:
 
 ```xml
-<private_key>~\.ssh\id_ed25519</private_key>
+<private_key><![CDATA[~\.ssh\id_ed25519]]></private_key>
 <destinations>
-  <destination>sftp://me@backup.example.com/backups/laptop</destination>
+  <destination><![CDATA[sftp://me@backup.example.com/backups/laptop]]></destination>
   <destination>
     <name>usb</name>
-    <path>E:\backups\laptop</path>
+    <path><![CDATA[E:\backups\laptop]]></path>
     <keep_history_days>365</keep_history_days>
   </destination>
 </destinations>
@@ -271,10 +281,10 @@ The second is where hback's three folders are. `current_folder`, `history_folder
 current folder, `.` means the destination folder itself:
 
 ```xml
-<sources>C:\deploy\site</sources>
-<destination>\\web1\apps\site</destination>
+<sources><![CDATA[C:\deploy\site]]></sources>
+<destination><![CDATA[\\web1\apps\site]]></destination>
 <source_path>none</source_path>
-<current_folder>.</current_folder>
+<current_folder><![CDATA[.]]></current_folder>
 ```
 
 Now `C:\deploy\site\index.html` arrives as `\\web1\apps\site\index.html`, with nothing of hback's
@@ -336,16 +346,16 @@ other machines the same as a folder on this one. Say a new version of a site is 
 <backup>
   <name>site</name>
   <sys><interval>300000</interval></sys>
-  <sources>C:\deploy\site</sources>
+  <sources><![CDATA[C:\deploy\site]]></sources>
   <source_path>none</source_path>
-  <current_folder>.</current_folder>
+  <current_folder><![CDATA[.]]></current_folder>
   <keep_history_days>7</keep_history_days>
-  <private_key>~\.ssh\id_ed25519</private_key>
-  <destinations>
+  <private_key><![CDATA[~\.ssh\id_ed25519]]></private_key>
+  <destinations><![CDATA[
     \\web1\apps\site
     sftp://deploy@web2.example.com/var/www/site
     sftp://deploy@web3.example.com/var/www/site
-  </destinations>
+  ]]></destinations>
 </backup>
 ```
 
@@ -378,8 +388,8 @@ To keep `.hback` out of a folder that is served to the public, name the folder a
 destination and the folder itself as the current folder:
 
 ```xml
-<destination>sftp://deploy@web2.example.com/var/www</destination>
-<current_folder>site</current_folder>
+<destination><![CDATA[sftp://deploy@web2.example.com/var/www]]></destination>
+<current_folder><![CDATA[site]]></current_folder>
 ```
 
 The files then go to `/var/www/site`, and hback's two folders are beside it: `/var/www/history` and
@@ -608,8 +618,8 @@ In place of `linux-x64` goes .NET's name for your system: `win-x64`, `win-arm64`
 A tag that starts with `v` publishes a release:
 
 ```
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.3.1
+git push origin v0.3.1
 ```
 
 The [release workflow](.github/workflows/release.yml) then runs on Linux, Windows and macOS. On each
