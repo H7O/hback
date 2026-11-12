@@ -19,18 +19,10 @@ public sealed record BackupJob
     /// <summary>Exclude patterns, one per entry, in the style of a .gitignore line.</summary>
     public IReadOnlyList<string> Excludes { get; init; } = [];
 
-    public required DestinationSpec Destination { get; init; }
+    /// <summary>Where the files go. Every destination gets all of them. There is at least one.</summary>
+    public required IReadOnlyList<DestinationSpec> Destinations { get; init; }
 
-    /// <summary>
-    /// How long the previous copy of a changed or deleted file is kept at the destination.
-    /// Zero keeps nothing: a changed file is overwritten and a deleted file is removed.
-    /// </summary>
-    public int KeepHistoryDays { get; init; } = 30;
-
-    /// <summary>How many files are copied at the same time. Each one uses its own SFTP connection.</summary>
-    public int Parallel { get; init; } = 4;
-
-    /// <summary>How many more times a run that could not reach the destination is tried.</summary>
+    /// <summary>How many more times a run that could not reach a destination is tried.</summary>
     public int Retries { get; init; } = 3;
 
     public int RetryWaitMinutes { get; init; } = 5;
@@ -41,31 +33,40 @@ public sealed record BackupJob
     /// <summary>The schedule in words, for <c>hback status</c>.</summary>
     public string ScheduleText { get; init; } = "";
 
-    public static BackupJob From(IHTaskItem task)
-        => From(key => task.GetItem(key)?.GetValue(), task.Schedule is not null) with { ScheduleText = DescribeSchedule(task.Schedule) };
+    /// <summary>
+    /// What a run to one destination is called in the log: the backup's name, and the destination
+    /// as well when the backup has more than one.
+    /// </summary>
+    public string LabelFor(DestinationSpec destination)
+        => Destinations.Count == 1 ? Name : $"{Name} ({destination.Label})";
 
-    /// <summary>"every 30 min", "once a day at 01:00", worded from the scheduler's own reading of the entry.</summary>
-    private static string DescribeSchedule(IHTaskControlProperties? schedule)
+    /// <summary>
+    /// The path a file or folder of this machine has at a destination, or null when it is not under
+    /// any source of this backup.
+    /// </summary>
+    public string? BackupPathOf(DestinationSpec destination, string fullPath)
     {
-        if (schedule is null) return "none (runs only with 'hback run')";
-        var text = schedule.Interval is { } ms
-            ? "every " + Engine.Text.Duration(TimeSpan.FromMilliseconds(ms))
-            : "once a day";
-        if (schedule.Time is { } time)
-            text += schedule.Interval is null ? $" at {time:hh\\:mm}" : $", from {time:hh\\:mm}";
-        if (schedule.UntilTime is { } until) text += $" until {until:hh\\:mm}";
-        if (schedule.DaysOfWeek is { } days) text += " on " + string.Join(", ", days);
-        if (!schedule.Enabled) text += " (disabled)";
-        return text;
+        fullPath = PathText.TrimEndSeparators(Path.GetFullPath(fullPath));
+        if (destination.SourcePath == SourcePathStyle.Full)
+            return PathText.ToBackupPath(fullPath);
+
+        // The longest source that holds it: with "C:\code" and "C:\code\app" both listed, a file in
+        // the second is looked for where the second put it.
+        foreach (var source in Sources.OrderByDescending(s => s.Length))
+        {
+            if (fullPath.Equals(source, PathComparison))
+                return File.Exists(source) ? PathText.FilePath(destination.SourcePath, source) : PathText.FolderPrefix(destination.SourcePath, source);
+
+            var top = source.EndsWith(Path.DirectorySeparatorChar) ? source : source + Path.DirectorySeparatorChar;
+            if (fullPath.StartsWith(top, PathComparison))
+                return PathText.Join(PathText.FolderPrefix(destination.SourcePath, source), PathText.ToMatchPath(fullPath[top.Length..]));
+        }
+        return null;
     }
 
-    public static BackupJob From(Func<string, string?> read, bool scheduled = true)
+    public static BackupJob From(IHTaskItem task)
     {
-        string? Get(string key)
-        {
-            var v = read(key)?.Trim();
-            return string.IsNullOrEmpty(v) ? null : v;
-        }
+        string? Get(string key) => Clean(task.GetItem(key)?.GetValue());
 
         var name = Get("name") ?? throw new ConfigException("A backup has no <name>.");
 
@@ -82,31 +83,149 @@ public sealed record BackupJob
         if (sources.Count == 0)
             throw new ConfigException($"Backup '{name}' has no <sources>. List one folder or file per line.");
 
-        var destination = Get("destination")
-            ?? throw new ConfigException($"Backup '{name}' has no <destination>.");
+        var destinations = ReadDestinations(task, name, Get);
 
-        DestinationSpec spec;
-        try
-        {
-            spec = DestinationSpec.Parse(destination, Get);
-        }
-        catch (ConfigException ex)
-        {
-            throw new ConfigException($"Backup '{name}': {ex.Message}");
-        }
+        // With only its own name kept, two sources of the same name would share one folder.
+        if (destinations.Any(d => d.SourcePath == SourcePathStyle.Name)
+            && sources.GroupBy(s => PathText.NameOf(PathText.ToBackupPath(s)), StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1) is { } twins)
+            throw new ConfigException($"Backup '{name}': with <source_path>name</source_path> the sources '{twins.First()}' and '{twins.Skip(1).First()}' " +
+                $"would both go into the folder '{twins.Key}'. Use full, or give each its own backup.");
 
         return new BackupJob
         {
             Name = name,
             Sources = sources,
             Excludes = PathText.Lines(Get("exclude")),
-            Destination = spec,
-            KeepHistoryDays = Number(Get("keep_history_days"), 30, 0, 36500, name, "keep_history_days"),
-            Parallel = Number(Get("parallel"), 4, 1, 16, name, "parallel"),
+            Destinations = destinations,
             Retries = Number(Get("retries"), 3, 0, 100, name, "retries"),
             RetryWaitMinutes = Number(Get("retry_wait_minutes"), 5, 0, 1440, name, "retry_wait_minutes"),
-            Scheduled = scheduled,
+            Scheduled = task.Schedule is not null,
+            ScheduleText = DescribeSchedule(task.Schedule),
         };
+    }
+
+    /// <summary>
+    /// The destinations of a backup. They can be written three ways, which may be mixed:
+    /// a <c>&lt;destination&gt;</c> element holding an address, repeated for each place;
+    /// a <c>&lt;destination&gt;</c> element holding a <c>&lt;path&gt;</c> and settings of its own;
+    /// and a <c>&lt;destinations&gt;</c> element listing addresses one per line, as <c>&lt;sources&gt;</c> does,
+    /// with <c>&lt;destination&gt;</c> elements among the lines for the ones that need settings.
+    /// A setting that a destination does not have itself is taken from the backup.
+    /// </summary>
+    private static List<DestinationSpec> ReadDestinations(IHTaskItem task, string name, Func<string, string?> fromBackup)
+    {
+        var found = new List<DestinationSpec>();
+
+        void Add(string address, Func<string, string?> get, string? label)
+        {
+            try
+            {
+                found.Add(DestinationSpec.Parse(address, get) with { Name = label });
+            }
+            catch (ConfigException ex)
+            {
+                throw new ConfigException($"Backup '{name}': {ex.Message}");
+            }
+        }
+
+        void AddElement(IHTaskItem element)
+        {
+            if (element.Children is not { Count: > 0 })
+            {
+                Add(Clean(element.GetValue()) ?? throw new ConfigException($"Backup '{name}' has an empty <destination>."), fromBackup, null);
+                return;
+            }
+
+            // An address written beside the settings would otherwise be passed over without a word.
+            if (OwnText(element).FirstOrDefault(text => !string.IsNullOrWhiteSpace(text)) is { } stray)
+                throw new ConfigException($"Backup '{name}': a <destination> with settings of its own gives its address in a <path>. '{stray.Trim()}' is not in one.");
+
+            string? Own(string key) => Clean(element.GetItem(key)?.GetValue());
+            Add(Own("path") ?? throw new ConfigException($"Backup '{name}': a <destination> with settings of its own needs a <path>, the folder or sftp:// address."),
+                key => Own(key) ?? fromBackup(key), Own("name"));
+        }
+
+        foreach (var element in task.GetItems("destination") ?? [])
+            if (element is not null) AddElement(element);
+
+        if (task.GetItem("destinations") is { } list)
+        {
+            var elements = (list.Children ?? []).Where(e => e is not null).ToList();
+            if (elements.Count == 0)
+            {
+                foreach (var line in PathText.Lines(Clean(list.GetValue())))
+                    Add(line, fromBackup, null);
+            }
+            else
+            {
+                // Lines and elements, in the order they are written.
+                var lines = OwnText(list);
+                for (var i = 0; i <= elements.Count; i++)
+                {
+                    foreach (var line in PathText.Lines(lines[i]))
+                        Add(line, fromBackup, null);
+                    if (i == elements.Count) break;
+                    if (!elements[i]!.Name.Equals("destination", StringComparison.OrdinalIgnoreCase))
+                        throw new ConfigException($"Backup '{name}': <destinations> holds a <{elements[i]!.Name}>. Inside it, list one address per line, and write a destination that needs settings of its own as a <destination>.");
+                    AddElement(elements[i]!);
+                }
+            }
+        }
+
+        if (found.Count == 0)
+            throw new ConfigException($"Backup '{name}' has no <destination>.");
+
+        for (var i = 0; i < found.Count; i++)
+            for (var j = i + 1; j < found.Count; j++)
+            {
+                if (found[i].SharesFoldersWith(found[j]))
+                    throw new ConfigException($"Backup '{name}' lists the destination {found[i].Display} twice.");
+                if (found[i].Name is { } label && label.Equals(found[j].Name, StringComparison.OrdinalIgnoreCase))
+                    throw new ConfigException($"Backup '{name}' has two destinations named '{label}'. Give each its own <name>.");
+            }
+        return found;
+    }
+
+    /// <summary>
+    /// The text an element holds itself, apart from what its child elements hold. It comes in pieces:
+    /// the first is what stands before the first child, the last what stands after the last one, so
+    /// there is always one more piece than there are children.
+    /// <para>
+    /// The scheduler's reader gives an element's text with its children's text run in, in the order of
+    /// the file. Taking each child's text out again, in that order, leaves the element's own.
+    /// </para>
+    /// </summary>
+    private static List<string> OwnText(IHTaskItem element)
+    {
+        var all = element.RawValue ?? "";
+        var pieces = new List<string>();
+        var at = 0;
+        foreach (var child in element.Children ?? [])
+        {
+            if (child is null) continue;
+            var inner = child.RawValue ?? "";
+            var found = all.IndexOf(inner, at, StringComparison.Ordinal);
+            if (found < 0) found = at;
+            pieces.Add(all[at..found]);
+            at = found + inner.Length;
+        }
+        pieces.Add(all[at..]);
+        return pieces;
+    }
+
+    /// <summary>"every 30 min", "once a day at 01:00", worded from the scheduler's own reading of the entry.</summary>
+    private static string DescribeSchedule(IHTaskControlProperties? schedule)
+    {
+        if (schedule is null) return "none (runs only with 'hback run')";
+        var text = schedule.Interval is { } ms
+            ? "every " + Engine.Text.Duration(TimeSpan.FromMilliseconds(ms))
+            : "once a day";
+        if (schedule.Time is { } time)
+            text += schedule.Interval is null ? $" at {time:hh\\:mm}" : $", from {time:hh\\:mm}";
+        if (schedule.UntilTime is { } until) text += $" until {until:hh\\:mm}";
+        if (schedule.DaysOfWeek is { } days) text += " on " + string.Join(", ", days);
+        if (!schedule.Enabled) text += " (disabled)";
+        return text;
     }
 
     /// <summary>Paths differ by letter case on Linux, and don't on Windows and macOS.</summary>
@@ -115,6 +234,12 @@ public sealed record BackupJob
 
     public static StringComparison PathComparison
         => OperatingSystem.IsLinux() ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+
+    private static string? Clean(string? value)
+    {
+        value = value?.Trim();
+        return string.IsNullOrEmpty(value) ? null : value;
+    }
 
     private static int Number(string? text, int fallback, int min, int max, string backup, string tag)
     {

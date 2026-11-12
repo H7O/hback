@@ -157,23 +157,28 @@ public sealed class StateStore : IAsyncDisposable
     public async Task<long> StartRunAsync(string backup, long dest)
         => (long)(await QueryAsync(Sql.StartRun, new { backup, dest, now = Now() }))[0]["id"]!;
 
-    public async Task FinishRunAsync(string backup, long run, string status, long scanned, long copied, long copiedBytes, long removed, long failed, string? message)
+    public async Task FinishRunAsync(string backup, long dest, long run, string status, long scanned, long copied, long copiedBytes, long removed, long failed, string? message)
     {
         await ExecuteAsync(Sql.FinishRun, new { run, now = Now(), status, scanned, copied, copied_bytes = copiedBytes, removed, failed, message });
         if (status == "ok" && copied == 0 && removed == 0 && failed == 0)
-            await ExecuteAsync(Sql.DropEarlierIdleRun, new { backup, run });
+            await ExecuteAsync(Sql.DropEarlierIdleRun, new { backup, dest, run });
     }
 
+    /// <summary>The latest runs of a backup, to whichever destination, newest first.</summary>
     public async Task<List<RunRecord>> GetLastRunsAsync(string backup, int take)
-        => (await QueryAsync(Sql.LastRun, new { backup, take }))
-            .Select(r => new RunRecord(
-                (long)r["id"]!, (string)r["backup"]!, ParseTime(r["started_at"] as string) ?? default, ParseTime(r["finished_at"] as string),
-                (string)r["status"]!, (long)r["scanned"]!, (long)r["copied"]!, (long)r["copied_bytes"]!, (long)r["removed"]!,
-                (long)r["failed"]!, r["message"] as string))
-            .ToList();
+        => (await QueryAsync(Sql.LastRun, new { backup, take })).Select(ToRun).ToList();
 
-    public async Task<DateTime?> GetLastGoodRunAsync(string backup)
-        => ParseTime((await QueryAsync(Sql.LastGoodRun, new { backup })).FirstOrDefault()?["finished_at"] as string);
+    /// <summary>The latest runs of a backup to one destination, newest first.</summary>
+    public async Task<List<RunRecord>> GetLastRunsAsync(string backup, long dest, int take)
+        => (await QueryAsync(Sql.LastRunTo, new { backup, dest, take })).Select(ToRun).ToList();
+
+    public async Task<DateTime?> GetLastGoodRunAsync(string backup, long dest)
+        => ParseTime((await QueryAsync(Sql.LastGoodRunTo, new { backup, dest })).FirstOrDefault()?["finished_at"] as string);
+
+    private static RunRecord ToRun(IDictionary<string, object?> r)
+        => new((long)r["id"]!, (string)r["backup"]!, ParseTime(r["started_at"] as string) ?? default, ParseTime(r["finished_at"] as string),
+            (string)r["status"]!, (long)r["scanned"]!, (long)r["copied"]!, (long)r["copied_bytes"]!, (long)r["removed"]!,
+            (long)r["failed"]!, r["message"] as string);
 
     #endregion
 

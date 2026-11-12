@@ -111,6 +111,56 @@ public class ServiceTests(ITestOutputHelper output) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task The_service_sends_the_files_straight_into_every_destination_of_a_backup()
+    {
+        _env.Write("app/a.txt", "alpha");
+        var second = Path.Combine(_env.Root, "dest2");
+        Directory.CreateDirectory(second);
+        // Laid out for handing files on to other machines: no "current" folder and none of the source's path.
+        File.WriteAllText(_env.Paths.ConfigPath, $"""
+            <hback>
+              <backup>
+                <name>svc</name>
+                <sys><interval>1000</interval></sys>
+                <sources>{_env.SourceDir}</sources>
+                <source_path>none</source_path>
+                <current_folder>.</current_folder>
+                <destinations>
+                  {_destination}
+                  {second}
+                </destinations>
+              </backup>
+            </hback>
+            """);
+        string[] places = [_destination, second];
+
+        using var host = Build();
+        await host.StartAsync();
+        try
+        {
+            foreach (var place in places)
+                await WaitForAsync(() => Task.FromResult(TryRead(Path.Combine(place, "app", "a.txt")) == "alpha"), $"a.txt to arrive in {place}");
+
+            _env.Write("app/a.txt", "alpha, edited");
+            foreach (var place in places)
+                await WaitForAsync(() => Task.FromResult(TryRead(Path.Combine(place, "app", "a.txt")) == "alpha, edited"), $"the edit to arrive in {place}");
+        }
+        finally
+        {
+            await host.StopAsync();
+        }
+
+        foreach (var place in places)
+        {
+            Assert.False(Directory.Exists(Path.Combine(place, BackupLayout.Current)));
+            // The copy that the edit replaced is kept, out of the way of the files.
+            var kept = Assert.Single(Directory.GetFiles(Path.Combine(place, ".hback", "history"), "a.txt", SearchOption.AllDirectories));
+            Assert.Equal("alpha", File.ReadAllText(kept));
+        }
+        Assert.DoesNotContain(_env.Log.Lines, l => l.StartsWith("[Error]") || l.StartsWith("[Warning]"));
+    }
+
+    [Fact]
     public async Task Editing_the_configuration_takes_effect_without_a_restart()
     {
         _env.Write("a.txt", "alpha");
@@ -292,11 +342,5 @@ public class ServiceTests(ITestOutputHelper output) : IAsyncLifetime
         {
             await host.StopAsync();
         }
-    }
-
-    private sealed class TestLoggerProvider(TestLogger logger) : ILoggerProvider
-    {
-        public ILogger CreateLogger(string categoryName) => logger;
-        public void Dispose() { }
     }
 }

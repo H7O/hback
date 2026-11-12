@@ -11,7 +11,11 @@ using Renci.SshNet.Common;
 
 namespace HBack.Engine;
 
-/// <summary>The three folders hback keeps inside a backup's destination.</summary>
+/// <summary>
+/// The three folders hback keeps inside a backup's destination, under the names they have unless the
+/// configuration gives them others. Where they are for one destination is the business of
+/// <see cref="DestinationSpec"/>.
+/// </summary>
 public static class BackupLayout
 {
     /// <summary>The files as they are now. Everything in here is a complete file.</summary>
@@ -34,9 +38,10 @@ public static class BackupLayout
 }
 
 /// <summary>
-/// Runs one backup once: finds what changed since the last run, and copies only that.
+/// Runs one backup once: finds what changed since the last run, and copies only that, to each of the
+/// backup's destinations in turn. One destination failing does not keep the others from being served.
 /// <para>
-/// A file reaches the destination in two steps. It is written into <c>partial/</c>, and when it is
+/// A file reaches a destination in two steps. It is written into <c>partial/</c>, and when it is
 /// whole it is moved into <c>current/</c>. Only then is it recorded in the state database. So a run
 /// can be cut off at any point: what is recorded is complete, and the next run carries on with the rest.
 /// </para>
@@ -48,14 +53,14 @@ public sealed class BackupRunner
     private readonly AppPaths _paths;
     private readonly StateStore _state;
     private readonly ILogger _log;
-    private readonly Func<BackupJob, IDestinationFactory> _factories;
+    private readonly Func<DestinationSpec, IDestinationFactory> _factories;
 
-    public BackupRunner(AppPaths paths, StateStore state, ILogger log, Func<BackupJob, IDestinationFactory>? factories = null)
+    public BackupRunner(AppPaths paths, StateStore state, ILogger log, Func<DestinationSpec, IDestinationFactory>? factories = null)
     {
         _paths = paths;
         _state = state;
         _log = log;
-        _factories = factories ?? (job => DestinationFactory.For(job.Destination, state, log));
+        _factories = factories ?? (destination => DestinationFactory.For(destination, state, log));
     }
 
     /// <summary>A cut-off copy of a file at least this large is continued. A smaller one starts again.</summary>
@@ -69,12 +74,32 @@ public sealed class BackupRunner
 
     internal TimeSpan ProgressEvery { get; set; } = TimeSpan.FromSeconds(30);
 
-    public async Task<RunSummary> RunAsync(BackupJob job, bool dryRun, CancellationToken ct)
+    /// <summary>Runs the backup to each of its destinations, and says how each went, in their order.</summary>
+    /// <param name="only">The destinations to serve this time. Null serves them all.</param>
+    /// <param name="finished">Told how the run to each destination went as soon as it is over, so
+    /// that it can be said before the next destination's files start to fill the log.</param>
+    public async Task<List<RunSummary>> RunAsync(BackupJob job, bool dryRun, CancellationToken ct,
+        IReadOnlyCollection<DestinationSpec>? only = null, Action<RunSummary>? finished = null)
+    {
+        var scans = new Scans(job, _paths.DataDir, ct);
+        var summaries = new List<RunSummary>();
+        foreach (var destination in job.Destinations)
+        {
+            if (only is not null && !only.Contains(destination)) continue;
+            var summary = await RunAsync(job, destination, scans, dryRun, ct);
+            summaries.Add(summary);
+            finished?.Invoke(summary);
+            if (ct.IsCancellationRequested) break;
+        }
+        return summaries;
+    }
+
+    private async Task<RunSummary> RunAsync(BackupJob job, DestinationSpec destination, Scans scans, bool dryRun, CancellationToken ct)
     {
         var watch = Stopwatch.StartNew();
-        var summary = new RunSummary { Backup = job.Name };
+        var summary = new RunSummary { Backup = job.Name, Destination = destination };
 
-        using var runLock = RunLock.TryAcquire(_paths.LockDir, job.Destination.Id, TimeSpan.FromSeconds(1));
+        using var runLock = RunLock.TryAcquire(_paths.LockDir, destination.Id, TimeSpan.FromSeconds(1));
         if (runLock is null)
         {
             summary.Status = RunStatus.Skipped;
@@ -82,13 +107,13 @@ public sealed class BackupRunner
             return summary;
         }
 
-        var destId = await _state.GetDestinationIdAsync(job.Destination.Id);
+        var destId = await _state.GetDestinationIdAsync(destination.Id);
         long? runId = dryRun ? null : await _state.StartRunAsync(job.Name, destId);
-        await using var run = new Run(job, destId, runId, _factories(job), ct);
+        await using var run = new Run(job, destination, destId, runId, _factories(destination), ct);
 
         try
         {
-            await RunCoreAsync(run, summary, dryRun);
+            await RunCoreAsync(run, scans, summary, dryRun);
             summary.Status = run.Failed > 0 || summary.Unreadable > 0 || run.Problems > 0 ? RunStatus.Errors : RunStatus.Ok;
             if (summary.Status == RunStatus.Errors) summary.Message = run.FirstProblem;
         }
@@ -96,6 +121,13 @@ public sealed class BackupRunner
         {
             summary.Status = RunStatus.Cancelled;
             summary.Message = "Stopped before it finished. The next run carries on from here.";
+        }
+        catch (ConfigException ex)
+        {
+            // The configuration asks for something that can't be done. Waiting won't change that.
+            summary.Status = RunStatus.Failed;
+            summary.Message = ex.Message;
+            summary.WorthRetrying = false;
         }
         catch (Exception ex)
         {
@@ -111,27 +143,27 @@ public sealed class BackupRunner
         summary.Elapsed = watch.Elapsed;
 
         if (runId is not null)
-            await _state.FinishRunAsync(job.Name, runId.Value, summary.Status.ToString().ToLowerInvariant(), summary.Scanned,
+            await _state.FinishRunAsync(job.Name, destId, runId.Value, summary.Status.ToString().ToLowerInvariant(), summary.Scanned,
                 summary.Copied, summary.CopiedBytes, summary.Removed, summary.Failed, summary.Message);
         return summary;
     }
 
-    private async Task RunCoreAsync(Run run, RunSummary summary, bool dryRun)
+    private async Task RunCoreAsync(Run run, Scans scans, RunSummary summary, bool dryRun)
     {
         var job = run.Job;
+        var dest = run.Destination;
         var ct = run.Token;
 
-        // 1. What is on this machine now.
-        var skip = new List<string> { _paths.DataDir };
-        if (!job.Destination.IsSftp) skip.Add(job.Destination.Root);
-        var scan = await Task.Run(() => new SourceScanner().Scan(job, skip, ct), ct);
+        // 1. What is on this machine now. Destinations that lay the files out the same way share one look.
+        var (scan, firstUse) = await scans.GetAsync(dest.SourcePath);
         summary.Scanned = scan.Files.Count;
         summary.Unreadable = scan.Problems.Count;
         foreach (var problem in scan.Problems)
         {
             run.FirstProblem ??= problem;
-            _log.LogWarning("{Backup}: {Problem}", job.Name, problem);
+            if (firstUse) _log.LogWarning("{Backup}: {Problem}", job.Name, problem);
         }
+        RefuseWhatCannotBeLaidOut(dest, scan);
 
         // 2. What the destination holds, as recorded by earlier runs.
         run.Known = await _state.LoadFilesAsync(run.DestId);
@@ -184,8 +216,8 @@ public sealed class BackupRunner
             return;
         }
 
-        var pruneDue = job.KeepHistoryDays > 0
-            && (await _state.GetLastPrunedAsync(job.Destination.Id) is not { } pruned || DateTime.UtcNow - pruned > TimeSpan.FromHours(20));
+        var pruneDue = dest.KeepHistoryDays > 0
+            && (await _state.GetLastPrunedAsync(dest.Id) is not { } pruned || DateTime.UtcNow - pruned > TimeSpan.FromHours(20));
         if (toCopy.Count == 0 && toRemove.Count == 0 && foldersToCreate.Count == 0 && foldersToForget.Count == 0 && !pruneDue)
             return; // Nothing changed, so the destination is not even contacted.
 
@@ -194,15 +226,15 @@ public sealed class BackupRunner
         run.LogEachFile = toCopy.Count + toRemove.Count <= 50;
         await run.WithSessionAsync(async session =>
         {
-            await session.CreateFolderAsync(BackupLayout.Current, ct);
-            await session.CreateFolderAsync(BackupLayout.Partial, ct);
-            if (job.KeepHistoryDays > 0)
-                run.Stamp = await PickStampAsync(session, ct);
+            await session.CreateFolderAsync(dest.CurrentFolder, ct);
+            await session.CreateFolderAsync(dest.PartialFolder, ct);
+            if (dest.KeepHistoryDays > 0)
+                run.Stamp = await PickStampAsync(session, dest, ct);
         });
 
         if (toCopy.Count > 50)
-            _log.LogInformation("{Backup}: {Files} to copy ({Bytes}) to {Destination}.", job.Name, Text.Count(toCopy.Count, "file"),
-                Text.Bytes(toCopy.Sum(f => f.Size)), job.Destination.Display);
+            _log.LogInformation("{Backup}: {Files} to copy ({Bytes}) to {Destination}.", run.Label, Text.Count(toCopy.Count, "file"),
+                Text.Bytes(toCopy.Sum(f => f.Size)), dest.Display);
 
         await ForEachAsync(run, toRemove, RemoveOneAsync, path => path, "remove");
         await ForEachAsync(run, toCopy, CopyOneAsync, file => file.FullPath, "copy", toCopy.Count);
@@ -215,7 +247,7 @@ public sealed class BackupRunner
             {
                 foreach (var folder in foldersToCreate)
                 {
-                    var at = BackupLayout.Current + "/" + folder;
+                    var at = dest.InCurrent(folder);
                     try
                     {
                         await session.CreateFolderAsync(at, ct);
@@ -240,10 +272,12 @@ public sealed class BackupRunner
                 await DeleteEmptiedFoldersAsync(run, session, emptyFolders);
                 if (run.Failed == 0)
                 {
-                    // Every copy finished, so whatever is left in partial/ belongs to files that no longer exist.
-                    foreach (var leftover in await session.ListAsync(BackupLayout.Partial, ct))
-                        if (!leftover.IsFolder)
-                            await session.DeleteFileAsync(BackupLayout.Partial + "/" + leftover.Name, ct);
+                    // Every copy finished, so whatever is left in partial/ belongs to files that no longer
+                    // exist. Only what hback itself puts there is deleted: the folder's place can be set in
+                    // the configuration, and it may then hold someone else's files as well.
+                    foreach (var leftover in await session.ListAsync(dest.PartialFolder, ct))
+                        if (!leftover.IsFolder && IsPartialName(leftover.Name))
+                            await session.DeleteFileAsync(dest.InPartial(leftover.Name), ct);
                     await _state.DeleteAllPartialsAsync(run.DestId);
                 }
                 if (pruneDue)
@@ -253,7 +287,30 @@ public sealed class BackupRunner
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             run.NoteProblem($"The files were copied, but tidying up at the destination did not finish: {ex.Message}");
-            _log.LogWarning("{Backup}: the files were copied, but tidying up at the destination did not finish: {Message}", job.Name, ex.Message);
+            _log.LogWarning("{Backup}: the files were copied, but tidying up at the destination did not finish: {Message}", run.Label, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Stops the run before anything is touched when the files can't be laid out the way the
+    /// configuration asks: two of them would get the same place, or one would land in a folder hback
+    /// keeps for itself.
+    /// </summary>
+    private static void RefuseWhatCannotBeLaidOut(DestinationSpec dest, ScanResult scan)
+    {
+        if (scan.Collision is { } twins)
+            throw new ConfigException($"'{twins.First}' and '{twins.Second}' would both be stored as '{twins.BackupPath}'. " +
+                (dest.SourcePath == SourcePathStyle.None
+                    ? "With <source_path>none</source_path> the files of every source go into one folder. Use name or full to keep the sources apart."
+                    : "Use <source_path>full</source_path> to keep the sources apart."));
+
+        foreach (var own in dest.OwnFoldersInCurrent)
+        {
+            var intruder = scan.Files.FirstOrDefault(f => PathText.IsSameOrInside(f.BackupPath, own))?.FullPath
+                ?? scan.EmptyFolders.FirstOrDefault(f => PathText.IsSameOrInside(f, own));
+            if (intruder is not null)
+                throw new ConfigException($"'{intruder}' would be stored inside '{own}', which is where hback keeps its own files at this destination. " +
+                    "Give hback's folder another name with <history_folder> or <partial_folder>.");
         }
     }
 
@@ -307,7 +364,7 @@ public sealed class BackupRunner
                 source.Position = 0;
             }
 
-            var partial = BackupLayout.Partial + "/" + PartialName(path);
+            var partial = run.Destination.InPartial(PartialName(path));
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
 
             // A large file that was cut off last time continues where it stopped, as long as the
@@ -322,7 +379,7 @@ public sealed class BackupRunner
                     && await HashPrefixAsync(source, there.Size, hash, ct))
                 {
                     offset = there.Size;
-                    _log.LogInformation("{Backup}: continuing {File} from {Done} of {Size}.", run.Job.Name, file.FullPath, Text.Bytes(offset), Text.Bytes(size));
+                    _log.LogInformation("{Backup}: continuing {File} from {Done} of {Size}.", run.Label, file.FullPath, Text.Bytes(offset), Text.Bytes(size));
                 }
                 else
                 {
@@ -345,7 +402,7 @@ public sealed class BackupRunner
             }
 
             // The file is whole. Put it in place, keeping the copy it replaces if history is on.
-            var final = BackupLayout.Current + "/" + path;
+            var final = run.Destination.InCurrent(path);
             if (known is not null)
                 await SetAsideAsync(run, session, path);
             await session.CreateFolderAsync(PathText.ParentOf(final), ct);
@@ -368,11 +425,11 @@ public sealed class BackupRunner
 
             info.Refresh();
             if (total != size || !info.Exists || info.Length != size || info.LastWriteTimeUtc.Ticks != modified)
-                _log.LogWarning("{Backup}: {File} changed while it was being copied. It will be copied again on the next run.", run.Job.Name, file.FullPath);
+                _log.LogWarning("{Backup}: {File} changed while it was being copied. It will be copied again on the next run.", run.Label, file.FullPath);
 
             run.CountCopied(total - offset);
             if (run.LogEachFile)
-                _log.LogInformation("{Backup}: copied {File} ({Size})", run.Job.Name, file.FullPath, Text.Bytes(total));
+                _log.LogInformation("{Backup}: copied {File} ({Size})", run.Label, file.FullPath, Text.Bytes(total));
         }
     }
 
@@ -383,8 +440,8 @@ public sealed class BackupRunner
         run.EmptiedFolders[PathText.ParentOf(path)] = 0;
         run.CountRemoved();
         if (run.LogEachFile)
-            _log.LogInformation("{Backup}: {Path} is no longer in the sources (deleted or now excluded), {Action}", run.Job.Name, path,
-                run.Job.KeepHistoryDays > 0 ? "so its copy was moved to history" : "so its copy was deleted");
+            _log.LogInformation("{Backup}: {Path} is no longer in the sources (deleted or now excluded), {Action}", run.Label, path,
+                run.Destination.KeepHistoryDays > 0 ? "so its copy was moved to history" : "so its copy was deleted");
     }
 
     /// <summary>
@@ -394,14 +451,14 @@ public sealed class BackupRunner
     private static async Task SetAsideAsync(Run run, IDestination session, string path)
     {
         var ct = run.Token;
-        var from = BackupLayout.Current + "/" + path;
-        if (run.Job.KeepHistoryDays <= 0)
+        var from = run.Destination.InCurrent(path);
+        if (run.Destination.KeepHistoryDays <= 0)
         {
             await session.DeleteFileAsync(from, ct);
             return;
         }
 
-        var to = $"{BackupLayout.History}/{run.Stamp}/{path}";
+        var to = run.Destination.InHistory(run.Stamp, path);
         await session.CreateFolderAsync(PathText.ParentOf(to), ct);
         try
         {
@@ -441,7 +498,7 @@ public sealed class BackupRunner
             while (!queue.IsEmpty)
             {
                 var before = queue.Count;
-                var workers = Enumerable.Range(0, Math.Min(run.Job.Parallel, before)).Select(_ => Task.Run(async () =>
+                var workers = Enumerable.Range(0, Math.Min(run.Destination.Parallel, before)).Select(_ => Task.Run(async () =>
                 {
                     while (queue.TryDequeue(out var item))
                     {
@@ -495,7 +552,7 @@ public sealed class BackupRunner
                     else run.Return(session);
                 }
                 run.CountFailed($"Can't read '{describe(item)}': {ex.Message}");
-                _log.LogWarning("{Backup}: can't read {Item}: {Message}", run.Job.Name, describe(item), ex.Message);
+                _log.LogWarning("{Backup}: can't read {Item}: {Message}", run.Label, describe(item), ex.Message);
                 return true;
             }
             catch (Exception ex)
@@ -506,7 +563,7 @@ public sealed class BackupRunner
                 {
                     if (run.NoteConnectionLimit())
                         _log.LogInformation("{Backup}: the destination allowed {Allowed} at a time and refused one more ({Message}), so files are copied {Count} at a time.",
-                            run.Job.Name, Text.Count(run.LiveSessions, "connection"), ex.Message, run.LiveSessions);
+                            run.Label, Text.Count(run.LiveSessions, "connection"), ex.Message, run.LiveSessions);
                     return false;
                 }
 
@@ -517,13 +574,13 @@ public sealed class BackupRunner
                 {
                     var wait = RetryDelays[Math.Min(attempt - 1, RetryDelays.Length - 1)];
                     _log.LogWarning("{Backup}: could not {Verb} {Item}: {Message} Trying again in {Seconds} s.",
-                        run.Job.Name, verb, describe(item), ex.Message, (int)wait.TotalSeconds);
+                        run.Label, verb, describe(item), ex.Message, (int)wait.TotalSeconds);
                     await Task.Delay(wait, run.Token);
                     continue;
                 }
 
                 run.CountFailed($"Could not {verb} '{describe(item)}': {ex.Message}");
-                _log.LogError("{Backup}: could not {Verb} {Item}: {Message}", run.Job.Name, verb, describe(item), ex.Message);
+                _log.LogError("{Backup}: could not {Verb} {Item}: {Message}", run.Label, verb, describe(item), ex.Message);
 
                 // One bad file is not a reason to stop. A destination that is gone is: without this,
                 // a run would grind through every remaining file, waiting on each.
@@ -545,7 +602,7 @@ public sealed class BackupRunner
         {
             using var timer = new PeriodicTimer(ProgressEvery);
             while (await timer.WaitForNextTickAsync(stop))
-                _log.LogInformation("{Backup}: {Done} of {Total} files copied ({Bytes}).", run.Job.Name,
+                _log.LogInformation("{Backup}: {Done} of {Total} files copied ({Bytes}).", run.Label,
                     (run.Copied + run.SameContent + run.Failed).ToString("N0", CultureInfo.InvariantCulture),
                     total.ToString("N0", CultureInfo.InvariantCulture), Text.Bytes(run.CopiedBytes));
         }
@@ -567,22 +624,34 @@ public sealed class BackupRunner
     private async Task<int> AdoptAsync(Run run, ScanResult scan)
     {
         var ct = run.Token;
+        var dest = run.Destination;
+        var own = dest.OwnFoldersInCurrent;
         var found = new Dictionary<string, DestinationEntry>(StringComparer.Ordinal);
         await run.WithSessionAsync(async session =>
         {
-            if (await session.StatAsync(BackupLayout.Current, ct) is null) return;
-            _log.LogInformation("{Backup}: there is no record of this destination yet, but it holds files. Checking which of them are already up to date.", run.Job.Name);
+            if (await session.StatAsync(dest.CurrentFolder, ct) is null) return;
 
             var pending = new Stack<string>();
             pending.Push("");
             while (pending.Count > 0)
             {
                 var folder = pending.Pop();
-                foreach (var entry in await session.ListAsync(PathText.Join(BackupLayout.Current, folder), ct))
+                foreach (var entry in await session.ListAsync(dest.InCurrent(folder), ct))
                 {
                     var path = PathText.Join(folder, entry.Name);
-                    if (entry.IsFolder) pending.Push(path);
-                    else found[path] = entry;
+                    if (!entry.IsFolder)
+                    {
+                        // Said once, and only when there is something there: when the files go straight
+                        // into the destination folder, that folder exists before the first run too.
+                        if (found.Count == 0)
+                            _log.LogInformation("{Backup}: there is no record of this destination yet, but it holds files. Checking which of them are already up to date.", run.Label);
+                        found[path] = entry;
+                    }
+                    // hback's own folders are not the files it keeps, wherever they are.
+                    else if (!own.Any(o => PathText.IsSameOrInside(path, o)))
+                    {
+                        pending.Push(path);
+                    }
                 }
             }
         });
@@ -599,13 +668,13 @@ public sealed class BackupRunner
         return same.Count;
     }
 
-    private static async Task<string> PickStampAsync(IDestination session, CancellationToken ct)
+    private static async Task<string> PickStampAsync(IDestination session, DestinationSpec dest, CancellationToken ct)
     {
         var stamp = DateTime.Now.ToString(BackupLayout.StampFormat, CultureInfo.InvariantCulture);
-        if (await session.StatAsync(BackupLayout.History + "/" + stamp, ct) is null) return stamp;
+        if (await session.StatAsync(dest.InHistory(stamp), ct) is null) return stamp;
         // Two runs within the same second. Each gets its own folder, so neither overwrites the other's copies.
         for (var n = 2; ; n++)
-            if (await session.StatAsync($"{BackupLayout.History}/{stamp}-{n}", ct) is null)
+            if (await session.StatAsync(dest.InHistory($"{stamp}-{n}"), ct) is null)
                 return $"{stamp}-{n}";
     }
 
@@ -619,7 +688,7 @@ public sealed class BackupRunner
             var folder = start;
             while (folder.Length > 0 && !deleted.Contains(folder) && !keep.Contains(folder))
             {
-                if (!await session.TryDeleteEmptyFolderAsync(BackupLayout.Current + "/" + folder, run.Token)) break;
+                if (!await session.TryDeleteEmptyFolderAsync(run.Destination.InCurrent(folder), run.Token)) break;
                 deleted.Add(folder);
                 folder = PathText.ParentOf(folder);
             }
@@ -628,12 +697,13 @@ public sealed class BackupRunner
 
     private async Task PruneHistoryAsync(Run run, IDestination session)
     {
-        var cutoff = DateTime.Now.AddDays(-run.Job.KeepHistoryDays);
-        foreach (var entry in await session.ListAsync(BackupLayout.History, run.Token))
+        var dest = run.Destination;
+        var cutoff = DateTime.Now.AddDays(-dest.KeepHistoryDays);
+        foreach (var entry in await session.ListAsync(dest.HistoryFolder, run.Token))
         {
             if (!entry.IsFolder || !BackupLayout.TryParseStamp(entry.Name, out var when) || when >= cutoff) continue;
-            await session.DeleteTreeAsync(BackupLayout.History + "/" + entry.Name, run.Token);
-            _log.LogInformation("{Backup}: deleted history from {When}, older than {Days} days.", run.Job.Name, entry.Name, run.Job.KeepHistoryDays);
+            await session.DeleteTreeAsync(dest.InHistory(entry.Name), run.Token);
+            _log.LogInformation("{Backup}: deleted history from {When}, older than {Days} days.", run.Label, entry.Name, dest.KeepHistoryDays);
         }
         await _state.SetLastPrunedAsync(run.DestId);
     }
@@ -678,10 +748,38 @@ public sealed class BackupRunner
     internal static string PartialName(string backupPath)
         => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(backupPath)))[..32] + ".part";
 
+    /// <summary>Whether a file name is one that <see cref="PartialName"/> makes.</summary>
+    internal static bool IsPartialName(string name)
+        => name.Length == 37 && name.EndsWith(".part", StringComparison.Ordinal) && name.AsSpan(0, 32).IndexOfAnyExcept("0123456789abcdef") < 0;
+
     #endregion
 
-    /// <summary>What one run carries around: its counters, its connections, and its stop signal.</summary>
-    private sealed class Run(BackupJob job, long destId, long? runId, IDestinationFactory factory, CancellationToken outer) : IAsyncDisposable
+    /// <summary>
+    /// The looks at the sources that one run of a backup takes. Destinations that lay the files out
+    /// the same way share one, so the sources are walked once however many places the files go to,
+    /// and every one of those places is given the same set of files.
+    /// </summary>
+    private sealed class Scans(BackupJob job, string dataDir, CancellationToken ct)
+    {
+        private readonly Dictionary<SourcePathStyle, Task<ScanResult>> _byStyle = [];
+
+        /// <returns>The scan, and whether this is the first time it is asked for, which is when
+        /// what could not be read is worth saying.</returns>
+        public async Task<(ScanResult Scan, bool FirstUse)> GetAsync(SourcePathStyle style)
+        {
+            var firstUse = !_byStyle.TryGetValue(style, out var scan);
+            if (firstUse)
+            {
+                // hback never backs up its own data, nor a destination that sits inside a source.
+                var skip = job.Destinations.Where(d => !d.IsSftp).Select(d => d.Root).Append(dataDir).ToList();
+                _byStyle[style] = scan = Task.Run(() => new SourceScanner().Scan(job, style, skip, ct), ct);
+            }
+            return (await scan!, firstUse);
+        }
+    }
+
+    /// <summary>What one run to one destination carries around: its counters, its connections, and its stop signal.</summary>
+    private sealed class Run(BackupJob job, DestinationSpec destination, long destId, long? runId, IDestinationFactory factory, CancellationToken outer) : IAsyncDisposable
     {
         private readonly CancellationTokenSource _stop = CancellationTokenSource.CreateLinkedTokenSource(outer);
         private readonly ConcurrentBag<IDestination> _idle = [];
@@ -689,6 +787,11 @@ public sealed class BackupRunner
         private long _copiedBytes;
 
         public BackupJob Job => job;
+        public DestinationSpec Destination => destination;
+
+        /// <summary>What this run is called in the log.</summary>
+        public string Label { get; } = job.LabelFor(destination);
+
         public long DestId => destId;
         public long? RunId => runId;
         public CancellationToken Token => _stop.Token;

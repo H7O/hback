@@ -8,6 +8,9 @@ SFTP client and copy a file back by hand. Nothing about it needs hback to be rea
 
 It runs on Windows, Linux and macOS, as a service or from the command line.
 
+One backup can go to several places. That also makes hback a way to keep a folder on other machines
+the same as the folder on this one: see [Sending a folder to other machines](#sending-a-folder-to-other-machines).
+
 ## What a backup looks like
 
 Say you back up `C:\code` to `sftp://me@nas/backups/laptop`. On the server you get three folders:
@@ -29,6 +32,9 @@ under `current/` is a complete file, even if a run was cut off half way.
 When a file changes or is deleted, hback does not destroy the copy it has. It moves that copy into
 `history/`, in a folder named after the run. History older than `keep_history_days` (30 by default) is
 deleted. This is what saves you from a file you overwrote or deleted by mistake last week.
+
+This is the layout unless you ask for another. [Where the files go](#where-the-files-go) shows how to
+change it, down to putting the files straight into the destination folder.
 
 ## Install
 
@@ -186,18 +192,105 @@ you edit runs straight away.
 | `sources` | Folders and files to back up, one per line, as full paths. `~` is your home folder. |
 | `exclude` | What to leave out, one pattern per line. See below. |
 | `destination` | A folder (`D:\backups\laptop`), or `sftp://user@host:port/folder`. Use `sftp://user@host/~/folder` for a folder under the login folder. Each backup needs a destination folder of its own. |
+| `destinations` | More than one destination, one per line. See "Several destinations". |
 | `private_key` | For SFTP: the private key file. OpenSSH and PEM formats both work. |
 | `passphrase` | The key's passphrase, if it has one. |
 | `password` | For SFTP: a password, when you don't use a key. |
 | `host_key` | Optional. The server's host key fingerprint (`SHA256:...`). See "Host keys". |
 | `keep_history_days` | How long replaced and deleted files stay in `history/`. Default 30. `0` keeps none: a changed file is overwritten and a deleted file is removed. |
 | `parallel` | How many files are copied at once. Default 4. Each uses its own connection. |
-| `retries`, `retry_wait_minutes` | When the destination can't be reached, the service tries again this many times (default 3), this far apart (default 5 minutes), before waiting for the next scheduled run. |
+| `source_path` | How much of each source's own path is repeated at the destination: `full` (the default), `name` or `none`. See "Where the files go". |
+| `current_folder`, `history_folder`, `partial_folder` | Other names or places for hback's three folders inside the destination. See "Where the files go". |
+| `retries`, `retry_wait_minutes` | When a destination can't be reached, the service tries again this many times (default 3), this far apart (default 5 minutes), before waiting for the next scheduled run. |
 
 A local destination folder must exist already. hback doesn't create it, so that an unplugged USB
 drive or an unmounted share is never mistaken for an empty destination.
 
 A path with `&` in it must be written with `&amp;`, because this is XML.
+
+### Several destinations
+
+A backup can go to more than one place. List them one per line in `<destinations>`, the way
+`<sources>` lists folders:
+
+```xml
+<private_key>~\.ssh\id_ed25519</private_key>
+<destinations>
+  E:\backups\laptop
+  sftp://me@backup.example.com/backups/laptop
+  sftp://me@second.example.com/backups/laptop
+</destinations>
+```
+
+Every destination gets all the files. hback serves them one after the other, in the order they are
+listed, and looks through the sources only once for all of them. A destination that can't be reached
+does not hold up the others, and when the service tries again it tries only that one. `hback status`
+reports on each destination by itself.
+
+The backup's other settings hold for every destination in the list. Here the one private key is used
+for both servers. A destination that needs something of its own is written as a `<destination>` block
+among the lines, with its address in `<path>`:
+
+```xml
+<private_key>~\.ssh\id_ed25519</private_key>
+<destinations>
+  sftp://me@backup.example.com/backups/laptop
+  <destination>
+    <name>usb</name>
+    <path>E:\backups\laptop</path>
+    <keep_history_days>365</keep_history_days>
+  </destination>
+</destinations>
+```
+
+A block can set anything in the table above from `private_key` to `partial_folder`. What it doesn't
+set, it takes from the backup. Its `<name>` is optional. The log and `hback status` call the
+destination by it, and `--destination` takes it on the command line.
+
+Repeating `<destination>` in the backup, once for each place, does the same as the list.
+
+### Where the files go
+
+Two things about the layout at a destination can be changed. A backup needs neither.
+
+The first is how much of each source's own path is repeated there, which `source_path` sets. Take the
+file `C:\code\app\a.cs`, backed up from the source `C:\code`:
+
+| `source_path` | The file is stored as | What it means |
+| --- | --- | --- |
+| `full` | `current/C/code/app/a.cs` | The whole path. This is the default. Two sources can never collide, and the backup itself shows where every file came from. |
+| `name` | `current/code/app/a.cs` | Each source becomes a folder with the source's own name. Two sources of the same name can't be in one backup. |
+| `none` | `current/app/a.cs` | Only what is inside the source. |
+
+With `name` and `none`, files of two sources can want the same place. hback checks that before it
+copies anything. If two files would be stored as one, the run fails and names the two.
+
+The second is where hback's three folders are. `current_folder`, `history_folder` and
+`partial_folder` each take a folder inside the destination, such as `files` or `kept/history`. For the
+current folder, `.` means the destination folder itself:
+
+```xml
+<sources>C:\deploy\site</sources>
+<destination>\\web1\apps\site</destination>
+<source_path>none</source_path>
+<current_folder>.</current_folder>
+```
+
+Now `C:\deploy\site\index.html` arrives as `\\web1\apps\site\index.html`, with nothing of hback's
+around it. hback's other two folders then move out of the way, to `.hback/history` and
+`.hback/partial` in the same folder, unless you name them yourself.
+
+hback only ever touches the files it put somewhere itself. Other files in the folder are left alone.
+If a file is already where hback is about to put one, that file is treated as an older copy: it goes to
+history first, or is replaced when no history is kept.
+
+Both settings can be changed on a backup that has already run. A new `source_path` rearranges the
+destination on the next run: every file is copied to its new place, and the copies in the old places
+go to history. A new `current_folder` starts afresh in that folder, and the old folder stays as it is
+until you delete it.
+
+Two backups can share one destination folder when each has three folders of its own there, none of
+them inside a folder of the other. Otherwise each backup needs a destination folder of its own.
 
 ### When it runs
 
@@ -232,6 +325,65 @@ hback does not read your `.gitignore` files, on purpose. They leave out exactly 
 nowhere else and that a backup should keep: `.env` files, local settings, uncommitted work. Your `.git`
 folders are backed up too, unless you exclude them, so unpushed commits and stashes are covered.
 
+## Sending a folder to other machines
+
+hback was made for backups, but the same run does the work of a file distributor: it keeps a folder on
+other machines the same as a folder on this one. Say a new version of a site is put into
+`C:\deploy\site` on one machine, and three servers should have it:
+
+```xml
+<backup>
+  <name>site</name>
+  <sys><interval>300000</interval></sys>
+  <sources>C:\deploy\site</sources>
+  <source_path>none</source_path>
+  <current_folder>.</current_folder>
+  <keep_history_days>7</keep_history_days>
+  <private_key>~\.ssh\id_ed25519</private_key>
+  <destinations>
+    \\web1\apps\site
+    sftp://deploy@web2.example.com/var/www/site
+    sftp://deploy@web3.example.com/var/www/site
+  </destinations>
+</backup>
+```
+
+Every five minutes, which is the interval here, hback looks at `C:\deploy\site`. What was added or
+changed there is copied to each destination, and what was deleted there is removed from each. When
+nothing changed, it doesn't even connect.
+
+A file never shows up half-written. It is sent to `.hback/partial` first and moved into place when all
+of it has arrived.
+
+Nothing a run replaces or removes is lost at once. It is kept in `.hback/history` at that destination
+for `keep_history_days`, so every server holds its own way back to last week's files. `0` keeps
+nothing.
+
+A server that is down misses nothing for good. Its run fails, the others go ahead, and it is brought up
+to date when it can be reached again.
+
+Three things to know before you rely on it:
+
+- **It is not instant.** A change waits for the next run. An interval of a minute is fine, because a
+  run with nothing to do costs next to nothing.
+- **The files of one change arrive one after another**, not all at the same moment. For a short while
+  a destination holds some new files beside some old ones.
+- **It goes one way.** hback compares the source with its own record of what it sent. A file that
+  someone changes on a server is not copied back, and is not put right either until it changes at the
+  source. `hback verify` finds files that went missing or changed size, and with `--fix` the next run
+  sends them again.
+
+To keep `.hback` out of a folder that is served to the public, name the folder above it as the
+destination and the folder itself as the current folder:
+
+```xml
+<destination>sftp://deploy@web2.example.com/var/www</destination>
+<current_folder>site</current_folder>
+```
+
+The files then go to `/var/www/site`, and hback's two folders are beside it: `/var/www/history` and
+`/var/www/partial`.
+
 ## Commands
 
 ```
@@ -243,6 +395,10 @@ hback verify [name ...]   Check that every file hback recorded is at the destina
     --fix                 Forget the ones that are missing, so the next run copies them again.
 hback restore <name> --to <folder> [--path <path>] [--at <history folder>]
 ```
+
+For a backup with several destinations, `run`, `verify` and `restore` take `--destination` with the
+destination's `<name>`, or its number in the list. `hback run site --destination 2` sends the files to
+the second one only. Without it, `run` and `verify` go through them all, and `restore` reads the first.
 
 `--config <path>` points at another `hback.xml` (or a folder of `.xml` files), and `--data <folder>`
 at another place for hback's own database and logs. By default both are beside the program. The
@@ -261,6 +417,9 @@ hback restore projects --to D:\restored --path C:\code\app --at 2026-11-11_10300
 Files land under the folder you name, in the same layout as the backup (`D:\restored\C\code\app\...`).
 hback never writes over the original location by itself. `--at` takes the name of a folder under
 `history/` and restores the copies that run set aside.
+
+`--path` takes the original path whatever the layout is. With `source_path` set to `name` or `none`,
+the restored files have that shorter layout too: `D:\restored\app\...`.
 
 ## Running it as a service
 
@@ -371,7 +530,8 @@ half-done in `current/`. The next run copies what is still missing. A file of 8 
 partly sent continues from where it stopped, as long as the source hasn't changed since.
 
 **The server can't be reached.** The run fails with the reason, which `hback status` shows. The
-service tries again a few times, then waits for the next scheduled run.
+service tries again a few times, then waits for the next scheduled run. When a backup has several
+destinations, the others get their files all the same, and only the one that failed is tried again.
 
 **A file can't be read**, because another program holds it locked. It is reported, the rest is copied,
 and the run is marked as finished with problems.
@@ -447,14 +607,14 @@ In place of `linux-x64` goes .NET's name for your system: `win-x64`, `win-arm64`
 A tag that starts with `v` publishes a release:
 
 ```
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The [release workflow](.github/workflows/release.yml) then runs on Linux, Windows and macOS. On each
 it runs the tests, builds that system's downloads, and makes a real backup with them, by hand and as a
 service. It publishes the release only if all of that passed. The version comes from the tag. A tag
-with a hyphen in it, such as `v0.3.0-beta.1`, is published as a prerelease.
+with a hyphen in it, such as `v0.4.0-beta.1`, is published as a prerelease.
 
 "Run workflow" on the repository's Actions page does the same without publishing anything.
 

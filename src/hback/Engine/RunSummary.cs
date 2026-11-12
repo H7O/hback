@@ -16,10 +16,18 @@ public enum RunStatus
     Skipped,
 }
 
+/// <summary>How one run of a backup to one of its destinations went.</summary>
 public sealed class RunSummary
 {
     public required string Backup { get; init; }
+    public required Config.DestinationSpec Destination { get; init; }
     public RunStatus Status { get; set; }
+
+    /// <summary>
+    /// For a run that failed: whether trying again later could go better. It could when the
+    /// destination was out of reach. It could not when the configuration asks for the impossible.
+    /// </summary>
+    public bool WorthRetrying { get; set; } = true;
     public int Scanned { get; set; }
     public int Copied { get; set; }
     public long CopiedBytes { get; set; }

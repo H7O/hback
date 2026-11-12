@@ -119,9 +119,11 @@ internal static class Sql
     // A backup that runs every few minutes mostly finds nothing to do. Those runs would bury the
     // ones that did something, so a run with nothing to do replaces the one before it when that
     // one had nothing to do either. The newest is kept, which is what "last run" should show.
+    // "The one before it" is the one before it to the same destination: a backup with several
+    // destinations writes a run for each, one after the other.
     public const string DropEarlierIdleRun = """
         DELETE FROM runs
-        WHERE id = (SELECT MAX(id) FROM runs WHERE backup = {{backup}} AND id < {{run}})
+        WHERE id = (SELECT MAX(id) FROM runs WHERE backup = {{backup}} AND dest_id = {{dest}} AND id < {{run}})
           AND status = 'ok' AND copied = 0 AND removed = 0 AND failed = 0
         """;
 
@@ -130,9 +132,14 @@ internal static class Sql
         FROM runs WHERE backup = {{backup}} ORDER BY id DESC LIMIT {{take}}
         """;
 
-    public const string LastGoodRun = """
+    public const string LastRunTo = """
+        SELECT id, backup, dest_id, started_at, finished_at, status, scanned, copied, copied_bytes, removed, failed, message
+        FROM runs WHERE backup = {{backup}} AND dest_id = {{dest}} ORDER BY id DESC LIMIT {{take}}
+        """;
+
+    public const string LastGoodRunTo = """
         SELECT finished_at FROM runs
-        WHERE backup = {{backup}} AND status = 'ok' ORDER BY id DESC LIMIT 1
+        WHERE backup = {{backup}} AND dest_id = {{dest}} AND status = 'ok' ORDER BY id DESC LIMIT 1
         """;
 
     public const string GetHostKey = "SELECT fingerprint FROM known_hosts WHERE host = {{host}} AND port = {{port}}";

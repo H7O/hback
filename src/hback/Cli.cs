@@ -32,6 +32,11 @@ public static class Cli
                                     history/, like 2026-11-11_103000) instead of the current files.
           hback help | version
 
+        For a backup with several destinations, run, verify and restore also take:
+          --destination <which>     Only this destination: its <name>, or its number in the backup's
+                                    list (1 is the first). Name one backup with it. Without it, run
+                                    and verify go through them all, and restore reads the first.
+
         Options for every command:
           --config <path>           hback.xml, or a folder of .xml files. Default: beside the program.
                                     The HBACK_CONFIG environment variable sets it too.
@@ -46,7 +51,7 @@ public static class Cli
     {
         public string Command = "service";
         public List<string> Names = [];
-        public string? Config, Data, To, Path, At;
+        public string? Config, Data, To, Path, At, Destination;
         public bool DryRun, Fix, Verbose;
 
         public static Options Parse(string[] args)
@@ -64,6 +69,7 @@ public static class Cli
                     case "--to": o.To = Value(); break;
                     case "--path": o.Path = Value(); break;
                     case "--at": o.At = Value(); break;
+                    case "--destination": o.Destination = Value(); break;
                     case "--dry-run": o.DryRun = true; break;
                     case "--fix": o.Fix = true; break;
                     case "--verbose" or "-v": o.Verbose = true; break;
@@ -203,6 +209,7 @@ public static class Cli
     {
         var all = LoadJobs(paths);
         var jobs = Select(all, options.Names);
+        NeedsOneBackupForDestination(options);
         var service = new BackupService(paths, state, loggers);
 
         var worst = 0;
@@ -211,8 +218,8 @@ public static class Cli
             if (BackupService.FindConflict(job, all) is { } conflict)
                 throw new ConfigException(conflict);
 
-            var summary = await service.RunAsync(job, retry: false, options.DryRun, ct);
-            if (summary.Status is not (RunStatus.Ok or RunStatus.Skipped)) worst = 1;
+            var summaries = await service.RunAsync(job, retry: false, options.DryRun, ct, Pick(job, options.Destination));
+            if (summaries.Any(s => s.Status is not (RunStatus.Ok or RunStatus.Skipped))) worst = 1;
             if (ct.IsCancellationRequested) break;
         }
         return worst;
@@ -241,39 +248,54 @@ public static class Cli
         {
             Console.WriteLine();
             Console.WriteLine(job.Name);
-            Console.WriteLine($"  to         {job.Destination.Display}");
-            Console.WriteLine($"  schedule   {job.ScheduleText}");
 
-            var runs = await state.GetLastRunsAsync(job.Name, detailed ? 10 : 1);
-            if (runs.Count == 0)
-            {
-                Console.WriteLine("  last run   never");
-                continue;
-            }
+            // One destination: its lines sit under the backup's name, as they always have.
+            // Several: each gets a numbered "to" line, with its own lines indented under it.
+            var several = job.Destinations.Count > 1;
+            var indent = several ? "    " : "  ";
+            if (several) Console.WriteLine($"  schedule   {job.ScheduleText}");
 
-            var busy = IsRunning(paths, job);
-            Console.WriteLine($"  last run   {Describe(runs[0], busy)}");
-            if (runs[0].Status != "ok")
-                Console.WriteLine($"  last good  {(await state.GetLastGoodRunAsync(job.Name) is { } good ? When(good) : "never")}");
-            if (await state.FindDestinationIdAsync(job.Destination.Id) is { } dest)
+            for (var i = 0; i < job.Destinations.Count; i++)
             {
-                var (files, bytes) = await state.CountFilesAsync(dest);
-                Console.WriteLine($"  holds      {Text.Count(files, "file")}, {Text.Bytes(bytes)}");
-            }
-            if (detailed)
-            {
-                Console.WriteLine("  earlier runs");
-                foreach (var run in runs.Skip(1))
-                    Console.WriteLine($"    {Describe(run, false)}");
+                var destination = job.Destinations[i];
+                if (several)
+                {
+                    Console.WriteLine($"  to {i + 1,-8}{(destination.Name is null ? destination.Display : $"{destination.Name} ({destination.Display})")}");
+                }
+                else
+                {
+                    Console.WriteLine($"  to         {destination.Display}");
+                    Console.WriteLine($"  schedule   {job.ScheduleText}");
+                }
+
+                var dest = await state.FindDestinationIdAsync(destination.Id);
+                var runs = dest is null ? [] : await state.GetLastRunsAsync(job.Name, dest.Value, detailed ? 10 : 1);
+                if (dest is null || runs.Count == 0)
+                {
+                    Console.WriteLine($"{indent}last run   never");
+                    continue;
+                }
+
+                Console.WriteLine($"{indent}last run   {Describe(runs[0], IsRunning(paths, destination))}");
+                if (runs[0].Status != "ok")
+                    Console.WriteLine($"{indent}last good  {(await state.GetLastGoodRunAsync(job.Name, dest.Value) is { } good ? When(good) : "never")}");
+                var (files, bytes) = await state.CountFilesAsync(dest.Value);
+                Console.WriteLine($"{indent}holds      {Text.Count(files, "file")}, {Text.Bytes(bytes)}");
+                if (detailed)
+                {
+                    Console.WriteLine($"{indent}earlier runs");
+                    foreach (var run in runs.Skip(1))
+                        Console.WriteLine($"{indent}  {Describe(run, false)}");
+                }
             }
         }
         Console.WriteLine();
         return 0;
     }
 
-    private static bool IsRunning(AppPaths paths, BackupJob job)
+    private static bool IsRunning(AppPaths paths, DestinationSpec destination)
     {
-        using var probe = RunLock.TryAcquire(paths.LockDir, job.Destination.Id);
+        using var probe = RunLock.TryAcquire(paths.LockDir, destination.Id);
         return probe is null;
     }
 
@@ -307,23 +329,26 @@ public static class Cli
     private static async Task<int> VerifyAsync(AppPaths paths, Options options, StateStore state, ILoggerFactory loggers, CancellationToken ct)
     {
         var verifier = new Verifier(state, loggers.CreateLogger("hback"));
+        NeedsOneBackupForDestination(options);
         var worst = 0;
         foreach (var job in Select(LoadJobs(paths), options.Names))
+        foreach (var destination in Pick(job, options.Destination) ?? job.Destinations)
         {
-            var result = await verifier.VerifyAsync(job, options.Fix, ct);
+            var label = job.LabelFor(destination);
+            var result = await verifier.VerifyAsync(destination, options.Fix, ct);
             if (result.NeverRan)
             {
-                Console.WriteLine($"{job.Name}: has not run yet, so there is nothing to check.");
+                Console.WriteLine($"{label}: has not run yet, so there is nothing to check.");
                 continue;
             }
             if (result.Ok)
             {
-                Console.WriteLine($"{job.Name}: all {Text.Count(result.Checked, "file")} are at {job.Destination.Display}.");
+                Console.WriteLine($"{label}: all {Text.Count(result.Checked, "file")} are at {destination.Display}.");
                 continue;
             }
 
             worst = 1;
-            Console.WriteLine($"{job.Name}: {Text.Count(result.Missing.Count, "file")} missing and {result.WrongSize.Count} with the wrong size, out of {result.Checked.ToString("N0", CultureInfo.InvariantCulture)}.");
+            Console.WriteLine($"{label}: {Text.Count(result.Missing.Count, "file")} missing and {result.WrongSize.Count} with the wrong size, out of {result.Checked.ToString("N0", CultureInfo.InvariantCulture)}.");
             foreach (var path in result.Missing.Take(20)) Console.WriteLine($"  missing     {path}");
             foreach (var path in result.WrongSize.Take(20)) Console.WriteLine($"  wrong size  {path}");
             if (result.Missing.Count + result.WrongSize.Count > 40) Console.WriteLine("  ...");
@@ -344,7 +369,10 @@ public static class Cli
         if (string.IsNullOrWhiteSpace(options.To)) throw new UsageException("Say where to put the files: hback restore <name> --to <folder>");
 
         var job = Select(LoadJobs(paths), options.Names)[0];
-        var result = await new Restorer(state, loggers.CreateLogger("hback")).RestoreAsync(job, options.Path, options.At, options.To, ct);
+        var destination = Pick(job, options.Destination)?[0] ?? job.Destinations[0];
+        if (options.Destination is null && job.Destinations.Count > 1)
+            Console.WriteLine($"Taking the files from {destination.Label}, the first destination of '{job.Name}'. --destination picks another.");
+        var result = await new Restorer(state, loggers.CreateLogger("hback")).RestoreAsync(job, destination, options.Path, options.At, options.To, ct);
 
         Console.WriteLine($"Restored {Text.Count(result.Restored, "file")} ({Text.Bytes(result.Bytes)}) to {Path.GetFullPath(options.To)}."
             + (result.AlreadyThere > 0 ? $" {Text.Count(result.AlreadyThere, "file")} were there already." : "")
@@ -364,6 +392,24 @@ public static class Cli
         if (jobs.Count == 0)
             throw new ConfigException($"No backups are defined in {paths.ConfigPath}.");
         return jobs;
+    }
+
+    /// <summary>The destination of a backup that <c>--destination</c> names, or null when the option was not given.</summary>
+    private static List<DestinationSpec>? Pick(BackupJob job, string? which)
+    {
+        if (which is null) return null;
+        if (job.Destinations.FirstOrDefault(d => string.Equals(d.Name, which, StringComparison.OrdinalIgnoreCase)) is { } named)
+            return [named];
+        if (int.TryParse(which, NumberStyles.None, CultureInfo.InvariantCulture, out var number) && number >= 1 && number <= job.Destinations.Count)
+            return [job.Destinations[number - 1]];
+        throw new UsageException($"The backup '{job.Name}' has no destination '{which}'. Its destinations are: " +
+            string.Join(", ", job.Destinations.Select((d, i) => $"{i + 1} {d.Label}")) + ".");
+    }
+
+    private static void NeedsOneBackupForDestination(Options options)
+    {
+        if (options.Destination is not null && options.Names.Count != 1)
+            throw new UsageException("--destination picks one destination of one backup. Name that backup too, as in: hback run projects --destination 2");
     }
 
     private static List<BackupJob> Select(List<BackupJob> jobs, List<string> names)

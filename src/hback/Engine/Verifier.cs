@@ -14,30 +14,30 @@ public sealed class VerifyResult
 }
 
 /// <summary>
-/// Checks hback's record against the destination: every file it believes is there should be there,
+/// Checks hback's record against a destination: every file it believes is there should be there,
 /// with the size it was copied at. It lists the destination folder by folder, so it reads no file
 /// contents and is quick even over a slow link.
 /// </summary>
 public sealed class Verifier(StateStore state, ILogger log)
 {
     /// <param name="fix">Forget the files that are missing or the wrong size, so the next run copies them again.</param>
-    public async Task<VerifyResult> VerifyAsync(BackupJob job, bool fix, CancellationToken ct)
+    public async Task<VerifyResult> VerifyAsync(DestinationSpec destination, bool fix, CancellationToken ct)
     {
         var result = new VerifyResult();
-        if (await state.FindDestinationIdAsync(job.Destination.Id) is not { } destId)
+        if (await state.FindDestinationIdAsync(destination.Id) is not { } destId)
         {
             result.NeverRan = true;
             return result;
         }
 
         var files = await state.LoadFilesAsync(destId);
-        await using var session = DestinationFactory.For(job.Destination, state, log).Open();
+        await using var session = DestinationFactory.For(destination, state, log).Open();
         await session.ConnectAsync(ct);
 
         foreach (var folder in files.GroupBy(f => PathText.ParentOf(f.Key), StringComparer.Ordinal))
         {
             ct.ThrowIfCancellationRequested();
-            var there = (await session.ListAsync(PathText.Join(BackupLayout.Current, folder.Key), ct))
+            var there = (await session.ListAsync(destination.InCurrent(folder.Key), ct))
                 .Where(e => !e.IsFolder)
                 .ToDictionary(e => e.Name, StringComparer.Ordinal);
 

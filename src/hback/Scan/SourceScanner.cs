@@ -4,13 +4,23 @@ namespace HBack.Scan;
 
 /// <summary>A file found under a source, with the size and time it had when it was found.</summary>
 /// <param name="FullPath">Where it is on this machine.</param>
-/// <param name="BackupPath">Where it goes inside the backup. See <see cref="PathText.ToBackupPath"/>.</param>
+/// <param name="BackupPath">Where it goes inside the backup. See <see cref="SourcePathStyle"/>.</param>
 /// <param name="ModifiedTicks">Last write time in UTC ticks.</param>
 public sealed record SourceFile(string FullPath, string BackupPath, long Size, long ModifiedTicks);
+
+/// <summary>Two files of this machine that would be stored at one and the same path.</summary>
+public sealed record PathCollision(string First, string Second, string BackupPath);
 
 public sealed class ScanResult
 {
     public List<SourceFile> Files { get; } = [];
+
+    /// <summary>
+    /// The first two different files that got the same place in the backup, if any did. It can't
+    /// happen while the whole source path is kept. It can when only part of it is, and then nothing
+    /// may be copied: one of the two would silently replace the other.
+    /// </summary>
+    public PathCollision? Collision { get; set; }
 
     /// <summary>
     /// Backup paths of the folders with nothing in them to back up. They are created at the
@@ -62,14 +72,17 @@ public sealed class SourceScanner
         ReturnSpecialDirectories = false,
     };
 
+    /// <param name="style">How much of each source's path the files keep in the backup. The paths in
+    /// the result are worked out for this, so destinations that differ in it are scanned for separately.</param>
     /// <param name="skipFolders">Folders to stay out of whatever the patterns say: hback's own data
-    /// folder, and the destination when it is a local folder inside a source.</param>
-    public ScanResult Scan(BackupJob job, IEnumerable<string> skipFolders, CancellationToken ct)
+    /// folder, and a destination that is a local folder inside a source.</param>
+    public ScanResult Scan(BackupJob job, SourcePathStyle style, IEnumerable<string> skipFolders, CancellationToken ct)
     {
         var result = new ScanResult();
         var matcher = new ExcludeMatcher(job.Excludes, ignoreCase: !OperatingSystem.IsLinux());
         var skip = new HashSet<string>(skipFolders.Select(PathText.TrimEndSeparators), BackupJob.PathComparer);
-        var seen = new HashSet<string>(StringComparer.Ordinal);
+        // Backup path to the file that has it. An empty folder is kept under its path with a slash added.
+        var seen = new Dictionary<string, string>(StringComparer.Ordinal);
 
         foreach (var source in job.Sources)
         {
@@ -77,29 +90,32 @@ public sealed class SourceScanner
             if (File.Exists(source))
             {
                 // A file named as a source is wanted, so the exclude patterns don't apply to it.
+                var backupPath = PathText.FilePath(style, source);
                 try
                 {
-                    Add(new FileInfo(source), PathText.ToBackupPath(source), result, seen);
+                    Add(new FileInfo(source), backupPath, result, seen);
                 }
                 catch (Exception ex) when (IsReadProblem(ex))
                 {
-                    result.MarkUnreadable(PathText.ToBackupPath(source), $"Can't read '{source}': {ex.Message}");
+                    result.MarkUnreadable(backupPath, $"Can't read '{source}': {ex.Message}");
                 }
             }
             else if (Directory.Exists(source))
             {
-                Walk(source, matcher, skip, result, seen, ct);
+                Walk(source, PathText.FolderPrefix(style, source), matcher, skip, result, seen, ct);
             }
             else
             {
-                result.MarkUnreadable(PathText.ToBackupPath(source), $"The source '{source}' was not found. Its files in the backup are left as they are.");
+                // Whether it was a folder or a file can't be told now, so everything it could have held is protected.
+                result.MarkUnreadable(PathText.FolderPrefix(style, source), $"The source '{source}' was not found. Its files in the backup are left as they are.");
             }
         }
         return result;
     }
 
-    private static void Walk(string root, ExcludeMatcher matcher, HashSet<string> skip, ScanResult result,
-        HashSet<string> seen, CancellationToken ct)
+    /// <param name="prefix">Where the contents of <paramref name="root"/> go in the backup.</param>
+    private static void Walk(string root, string prefix, ExcludeMatcher matcher, HashSet<string> skip, ScanResult result,
+        Dictionary<string, string> seen, CancellationToken ct)
     {
         // (folder, its path from the top of the source)
         var pending = new Stack<(string Folder, string Relative)>();
@@ -111,7 +127,7 @@ public sealed class SourceScanner
             var (folder, relative) = pending.Pop();
             if (skip.Contains(folder)) continue;
 
-            var folderBackupPath = PathText.ToBackupPath(folder);
+            var folderBackupPath = PathText.Join(prefix, relative);
             var folderMatchPath = PathText.ToMatchPath(folder);
             try
             {
@@ -140,7 +156,8 @@ public sealed class SourceScanner
                         Add((FileInfo)entry, PathText.Join(folderBackupPath, entry.Name), result, seen);
                 }
 
-                if (kept == 0 && seen.Add(folderBackupPath + "/"))
+                // The top of the backup needs no record: it is there whether a source is empty or not.
+                if (kept == 0 && folderBackupPath.Length > 0 && seen.TryAdd(folderBackupPath + "/", folder))
                     result.EmptyFolders.Add(folderBackupPath);
             }
             catch (Exception ex) when (IsReadProblem(ex))
@@ -150,11 +167,14 @@ public sealed class SourceScanner
         }
     }
 
-    private static void Add(FileInfo file, string backupPath, ScanResult result, HashSet<string> seen)
+    private static void Add(FileInfo file, string backupPath, ScanResult result, Dictionary<string, string> seen)
     {
-        // Two sources can overlap ("C:\code" and "C:\code\app"). The file is listed once.
-        if (seen.Add(backupPath))
+        if (seen.TryAdd(backupPath, file.FullName))
             result.Files.Add(new SourceFile(file.FullName, backupPath, file.Length, file.LastWriteTimeUtc.Ticks));
+        // Two sources can overlap ("C:\code" and "C:\code\app"). The file is then met twice and listed
+        // once. Two different files in one place is another matter, and the run has to refuse it.
+        else if (!BackupJob.PathComparer.Equals(seen[backupPath], file.FullName))
+            result.Collision ??= new PathCollision(seen[backupPath], file.FullName, backupPath);
     }
 
     private static bool IsLink(FileSystemInfo entry)

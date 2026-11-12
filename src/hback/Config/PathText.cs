@@ -41,6 +41,36 @@ public static class PathText
         return p.Trim('/');
     }
 
+    /// <summary>
+    /// The folder a source folder's contents go into at the destination. A file found at
+    /// "sub/a.cs" under the source is stored at this prefix plus "sub/a.cs".
+    /// For the source "C:\code\app": "C/code/app" with <see cref="SourcePathStyle.Full"/>, "app" with
+    /// <see cref="SourcePathStyle.Name"/>, and nothing with <see cref="SourcePathStyle.None"/>.
+    /// </summary>
+    public static string FolderPrefix(SourcePathStyle style, string source)
+        => style switch
+        {
+            SourcePathStyle.Full => ToBackupPath(source),
+            SourcePathStyle.Name => NameOf(ToBackupPath(source)),
+            _ => "",
+        };
+
+    /// <summary>
+    /// Where a source that is a single file goes at the destination. It always keeps its own name:
+    /// "C/notes/todo.txt" with <see cref="SourcePathStyle.Full"/>, "todo.txt" otherwise.
+    /// </summary>
+    public static string FilePath(SourcePathStyle style, string source)
+        => style == SourcePathStyle.Full ? ToBackupPath(source) : NameOf(ToBackupPath(source));
+
+    /// <summary>
+    /// Whether <paramref name="path"/> is <paramref name="folder"/> or lies in it. An empty folder is
+    /// the top, which holds everything. Letter case is ignored, because the destination may ignore it.
+    /// </summary>
+    public static bool IsSameOrInside(string path, string folder)
+        => folder.Length == 0
+            || path.Equals(folder, StringComparison.OrdinalIgnoreCase)
+            || (path.Length > folder.Length && path[folder.Length] == '/' && path.StartsWith(folder, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>The same path with forward slashes, used to match exclude patterns.</summary>
     public static string ToMatchPath(string fullPath)
         => (Path.DirectorySeparatorChar == '\\' ? fullPath.Replace('\\', '/') : fullPath).Trim('/');

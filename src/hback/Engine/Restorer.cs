@@ -12,23 +12,26 @@ public sealed record RestoreResult(int Restored, long Bytes, int AlreadyThere, i
 /// </summary>
 public sealed class Restorer(StateStore state, ILogger log)
 {
+    /// <param name="destination">The destination of the backup to take the files from. They all hold the same files.</param>
     /// <param name="path">A folder or file inside the backup ("C/code/app"), or the original path
     /// ("C:\code\app"). Null restores everything.</param>
     /// <param name="historyFolder">The name of a folder under <c>history/</c>, to restore the copies
     /// that were set aside by that run. Null restores the current files.</param>
-    public async Task<RestoreResult> RestoreAsync(BackupJob job, string? path, string? historyFolder, string targetFolder, CancellationToken ct)
+    public async Task<RestoreResult> RestoreAsync(BackupJob job, DestinationSpec destination, string? path, string? historyFolder, string targetFolder, CancellationToken ct)
     {
         targetFolder = Path.GetFullPath(targetFolder);
         Directory.CreateDirectory(targetFolder);
 
-        var from = historyFolder is null ? BackupLayout.Current : BackupLayout.History + "/" + historyFolder;
-        var start = string.IsNullOrWhiteSpace(path) ? "" : ToBackupPath(path);
+        var from = historyFolder is null ? destination.CurrentFolder : destination.InHistory(historyFolder);
+        var start = string.IsNullOrWhiteSpace(path) ? "" : ToBackupPath(job, destination, path);
+        // Where the current files share a folder with hback's own folders, those are not part of the files.
+        var own = historyFolder is null ? destination.OwnFoldersInCurrent : [];
 
-        await using var session = DestinationFactory.For(job.Destination, state, log).Open();
+        await using var session = DestinationFactory.For(destination, state, log).Open();
         await session.ConnectAsync(ct);
 
         var first = await session.StatAsync(PathText.Join(from, start), ct)
-            ?? throw new DestinationException($"There is no '{PathText.Join(from, start)}' in the backup at {job.Destination.Display}.");
+            ?? throw new DestinationException($"There is no '{PathText.Join(from, start)}' in the backup at {destination.Display}.");
 
         int restored = 0, alreadyThere = 0, failed = 0;
         long bytes = 0;
@@ -85,11 +88,12 @@ public sealed class Restorer(StateStore state, ILogger log)
             foreach (var entry in entries)
             {
                 var child = PathText.Join(folder, entry.Name);
+                if (own.Any(o => PathText.IsSameOrInside(child, o))) continue;
                 if (entry.IsFolder) pending.Push(child);
                 else await RestoreFileAsync(child, entry);
             }
 
-            // An empty folder is part of the tree too.
+            // An empty folder is part of the tree too. A folder that holds only hback's own folders is not one.
             if (entries.Count == 0 && folder.Length > 0)
             {
                 var target = Path.GetFullPath(Path.Combine(targetFolder, folder.Replace('/', Path.DirectorySeparatorChar)));
@@ -100,11 +104,12 @@ public sealed class Restorer(StateStore state, ILogger log)
         return new RestoreResult(restored, bytes, alreadyThere, failed);
     }
 
-    private static string ToBackupPath(string path)
+    private static string ToBackupPath(BackupJob job, DestinationSpec destination, string path)
     {
         path = path.Trim();
-        return Path.IsPathFullyQualified(path)
-            ? PathText.ToBackupPath(PathText.TrimEndSeparators(Path.GetFullPath(path)))
-            : path.Replace('\\', '/').Trim('/');
+        if (!Path.IsPathFullyQualified(path))
+            return path.Replace('\\', '/').Trim('/');
+        return job.BackupPathOf(destination, path)
+            ?? throw new DestinationException($"'{path}' is not inside any source of the backup '{job.Name}', so the backup holds no copy of it.");
     }
 }

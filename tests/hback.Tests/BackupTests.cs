@@ -2,6 +2,7 @@ using HBack.Config;
 using HBack.Destinations;
 using HBack.Engine;
 using HBack.Scan;
+using Microsoft.Extensions.Logging;
 using Xunit.Abstractions;
 
 namespace HBack.Tests;
@@ -33,9 +34,9 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         return (Env.Job(destination, keepHistoryDays, excludes), DiskFolder(destination));
     }
 
-    protected Task<RunSummary> RunAsync(BackupJob job) => Env.Runner().RunAsync(job, dryRun: false, CancellationToken.None);
+    protected Task<RunSummary> RunAsync(BackupJob job) => Env.Runner().RunOneAsync(job);
 
-    protected Troublemaker Trouble(BackupJob job) => new(DestinationFactory.For(job.Destination, Env.State, Env.Log));
+    protected Troublemaker Trouble(BackupJob job) => new(DestinationFactory.For(job.Destinations[0], Env.State, Env.Log));
 
     /// <summary>The path on this machine of a source file's copy in <c>current/</c>.</summary>
     protected string Current(string disk, string relative)
@@ -99,7 +100,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
 
         var trouble = Trouble(job);
         trouble.OutOfReach = true;
-        var summary = await Env.Runner(_ => trouble).RunAsync(job, false, CancellationToken.None);
+        var summary = await Env.Runner(_ => trouble).RunOneAsync(job);
 
         Assert.Equal(RunStatus.Ok, summary.Status);
         Assert.Equal(0, summary.Copied);
@@ -187,7 +188,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
 
         File.SetLastWriteTimeUtc(source, DateTime.UtcNow.AddHours(1));
         var trouble = Trouble(job);
-        var summary = await Env.Runner(_ => trouble).RunAsync(job, false, CancellationToken.None);
+        var summary = await Env.Runner(_ => trouble).RunOneAsync(job);
 
         Assert.Equal(RunStatus.Ok, summary.Status);
         Assert.Equal((0, 1), (summary.Copied, summary.SameContent));
@@ -230,7 +231,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         await Env.LoseStateAsync();
         Env.Write("new.txt", "new");
         var trouble = Trouble(job);
-        var summary = await Env.Runner(_ => trouble).RunAsync(job, false, CancellationToken.None);
+        var summary = await Env.Runner(_ => trouble).RunOneAsync(job);
 
         Assert.Equal(RunStatus.Ok, summary.Status);
         Assert.Equal(3, summary.Adopted);
@@ -250,7 +251,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         var runner = Env.Runner(_ => trouble);
         runner.ResumeThreshold = 1000;
 
-        var summary = await runner.RunAsync(job, false, CancellationToken.None);
+        var summary = await runner.RunOneAsync(job);
 
         Assert.Equal(RunStatus.Ok, summary.Status);
         Assert.Equal(1, summary.Copied);
@@ -272,14 +273,14 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         trouble.CutAfterBytes = 100_000;
         var runner = Env.Runner(_ => trouble);
         runner.ResumeThreshold = 1000;
-        var first = await runner.RunAsync(job, false, CancellationToken.None);
+        var first = await runner.RunOneAsync(job);
         Assert.Equal(1, first.Failed);
 
         // Same size, different bytes and time: the part already sent no longer belongs to this file.
         Env.WriteBytes("big.bin", 300_000, seed: 2);
         File.SetLastWriteTimeUtc(source, DateTime.UtcNow.AddMinutes(5));
         trouble.Writes.Clear();
-        var second = await runner.RunAsync(job, false, CancellationToken.None);
+        var second = await runner.RunOneAsync(job);
 
         Assert.Equal(RunStatus.Ok, second.Status);
         Assert.Equal(0, Assert.Single(trouble.Writes).Offset);
@@ -296,7 +297,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         var runner = Env.Runner(_ => trouble);
         runner.GiveUpAfter = 2;
 
-        var first = await runner.RunAsync(job, false, CancellationToken.None);
+        var first = await runner.RunOneAsync(job);
 
         Assert.Equal(RunStatus.Failed, first.Status);
         Assert.Contains("stopped answering", first.Message);
@@ -305,7 +306,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
 
         trouble.OutOfReach = false;
         trouble.GoOutOfReachAfterWrites = null;
-        var second = await runner.RunAsync(job, false, CancellationToken.None);
+        var second = await runner.RunOneAsync(job);
 
         Assert.Equal(RunStatus.Ok, second.Status);
         Assert.Equal(12 - first.Copied, second.Copied);
@@ -320,7 +321,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         var trouble = Trouble(job);
         trouble.MaxConnections = 2; // The backup asks for three at a time.
 
-        var summary = await Env.Runner(_ => trouble).RunAsync(job, false, CancellationToken.None);
+        var summary = await Env.Runner(_ => trouble).RunOneAsync(job);
 
         Assert.Equal(RunStatus.Ok, summary.Status);
         Assert.Equal((30, 0), (summary.Copied, summary.Failed));
@@ -336,7 +337,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         var trouble = Trouble(job);
         trouble.OutOfReach = true;
 
-        var summary = await Env.Runner(_ => trouble).RunAsync(job, false, CancellationToken.None);
+        var summary = await Env.Runner(_ => trouble).RunOneAsync(job);
 
         Assert.Equal(RunStatus.Failed, summary.Status);
         Assert.Contains("out of reach", summary.Message);
@@ -355,7 +356,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
 
         var target = Path.Combine(Env.Root, "restored");
         var restorer = new Restorer(Env.State, Env.Log);
-        var result = await restorer.RestoreAsync(job, null, null, target, CancellationToken.None);
+        var result = await restorer.RestoreAsync(job, job.Destinations[0], null, null, target, CancellationToken.None);
 
         Assert.Equal((4, 0), (result.Restored, result.Failed));
         foreach (var relative in new[] { "a.txt", "sub/b.cs", "sub/deep/data.bin", "empty.txt" })
@@ -363,12 +364,12 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
                 File.ReadAllBytes(Path.Combine(target, Env.InBackup(relative).Replace('/', Path.DirectorySeparatorChar))));
 
         // Restoring again finds everything in place.
-        var again = await restorer.RestoreAsync(job, null, null, target, CancellationToken.None);
+        var again = await restorer.RestoreAsync(job, job.Destinations[0], null, null, target, CancellationToken.None);
         Assert.Equal((0, 4), (again.Restored, again.AlreadyThere));
 
         // One folder, named by its original path.
         var part = Path.Combine(Env.Root, "restored-sub");
-        var some = await restorer.RestoreAsync(job, Env.PathOf("sub"), null, part, CancellationToken.None);
+        var some = await restorer.RestoreAsync(job, job.Destinations[0], Env.PathOf("sub"), null, part, CancellationToken.None);
         Assert.Equal(2, some.Restored);
         Assert.Equal(InBackup("sub/b.cs", "sub/deep/data.bin"), FilesUnder(part));
     }
@@ -392,7 +393,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         Assert.False(Directory.Exists(Current(disk, "only-excluded/node_modules")));
 
         var target = Path.Combine(Env.Root, "restored");
-        await new Restorer(Env.State, Env.Log).RestoreAsync(job, null, null, target, CancellationToken.None);
+        await new Restorer(Env.State, Env.Log).RestoreAsync(job, job.Destinations[0], null, null, target, CancellationToken.None);
         Assert.True(Directory.Exists(Path.Combine(target, Env.InBackup("repo/refs/tags").Replace('/', Path.DirectorySeparatorChar))));
 
         // One empty folder is deleted, one gets a file, and one folder becomes empty.
@@ -409,7 +410,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         // After that the backup is settled: the next run has nothing to do.
         var trouble = Trouble(job);
         trouble.OutOfReach = true;
-        Assert.Equal(RunStatus.Ok, (await Env.Runner(_ => trouble).RunAsync(job, false, CancellationToken.None)).Status);
+        Assert.Equal(RunStatus.Ok, (await Env.Runner(_ => trouble).RunOneAsync(job)).Status);
         Assert.Equal(0, trouble.Connections);
     }
 
@@ -424,7 +425,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
 
         var run = Path.GetFileName(Assert.Single(Directory.GetDirectories(Path.Combine(disk, BackupLayout.History))));
         var target = Path.Combine(Env.Root, "restored");
-        var result = await new Restorer(Env.State, Env.Log).RestoreAsync(job, null, run, target, CancellationToken.None);
+        var result = await new Restorer(Env.State, Env.Log).RestoreAsync(job, job.Destinations[0], null, run, target, CancellationToken.None);
 
         Assert.Equal(1, result.Restored);
         Assert.Equal("the first version", File.ReadAllText(Path.Combine(target, Env.InBackup("a.txt").Replace('/', Path.DirectorySeparatorChar))));
@@ -438,12 +439,12 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         var (job, disk) = Setup();
         await RunAsync(job);
         var verifier = new Verifier(Env.State, Env.Log);
-        Assert.True((await verifier.VerifyAsync(job, fix: false, CancellationToken.None)).Ok);
+        Assert.True((await verifier.VerifyAsync(job.Destinations[0], fix: false, CancellationToken.None)).Ok);
 
         File.Delete(Current(disk, "sub/b.txt"));
         File.WriteAllText(Current(disk, "a.txt"), "tampered with");
 
-        var found = await verifier.VerifyAsync(job, fix: true, CancellationToken.None);
+        var found = await verifier.VerifyAsync(job.Destinations[0], fix: true, CancellationToken.None);
         Assert.Equal(2, found.Checked);
         Assert.Equal(InBackup("sub/b.txt"), found.Missing);
         Assert.Equal(InBackup("a.txt"), found.WrongSize);
@@ -452,7 +453,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         Assert.Equal(2, summary.Copied);
         Assert.Equal("alpha", File.ReadAllText(Current(disk, "a.txt")));
         Assert.Equal("beta", File.ReadAllText(Current(disk, "sub/b.txt")));
-        Assert.True((await verifier.VerifyAsync(job, fix: false, CancellationToken.None)).Ok);
+        Assert.True((await verifier.VerifyAsync(job.Destinations[0], fix: false, CancellationToken.None)).Ok);
     }
 
     [SkippableFact]
@@ -521,7 +522,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         Env.Write("a.txt", "alpha");
         var (job, disk) = Setup();
 
-        var summary = await Env.Runner().RunAsync(job, dryRun: true, CancellationToken.None);
+        var summary = await Env.Runner().RunOneAsync(job, dryRun: true);
 
         Assert.Contains("1 file to copy", summary.Plan[0]);
         Assert.Empty(CurrentFiles(disk));
@@ -534,7 +535,7 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         Env.Write("a.txt", "alpha");
         var (job, disk) = Setup();
 
-        using (RunLock.TryAcquire(Env.Paths.LockDir, job.Destination.Id))
+        using (RunLock.TryAcquire(Env.Paths.LockDir, job.Destinations[0].Id))
             Assert.Equal(RunStatus.Skipped, (await RunAsync(job)).Status);
 
         Assert.Empty(CurrentFiles(disk));
@@ -561,17 +562,302 @@ public abstract class BackupTests(ITestOutputHelper output) : IAsyncLifetime
         Assert.Equal(InBackup([.. expected]), CurrentFiles(disk));
         Assert.Equal("7-3", File.ReadAllText(Current(disk, "p07/src/f03.txt")));
     }
+
+    #region where the files go at the destination
+
+    /// <summary>
+    /// The same backup laid out for sending files somewhere, not for keeping them: nothing of the
+    /// source's path is repeated, and the files go straight into the destination folder. This is what
+    /// source_path none with current_folder "." gives in the configuration.
+    /// </summary>
+    protected static BackupJob StraightIn(BackupJob job) => job.With(d => d with
+    {
+        SourcePath = SourcePathStyle.None,
+        CurrentFolder = "",
+        HistoryFolder = ".hback/history",
+        PartialFolder = ".hback/partial",
+    });
+
+    [SkippableFact]
+    public async Task With_only_its_name_kept_a_source_becomes_a_folder_of_that_name()
+    {
+        Env.Write("a.txt", "alpha");
+        Env.Write("sub/b.txt", "beta");
+        var (job, disk) = Setup();
+        job = job.With(d => d with { SourcePath = SourcePathStyle.Name });
+
+        var summary = await RunAsync(job);
+
+        Assert.Equal(RunStatus.Ok, summary.Status);
+        Assert.Equal(["src/a.txt", "src/sub/b.txt"], CurrentFiles(disk));
+    }
+
+    [SkippableFact]
+    public async Task Files_can_go_straight_into_the_destination_folder()
+    {
+        Env.Write("a.txt", "one");
+        Env.Write("sub/b.txt", "beta");
+        var (job, disk) = Setup();
+        job = StraightIn(job);
+        // A file that was in the folder before hback came, and that hback has no business with.
+        Directory.CreateDirectory(disk);
+        File.WriteAllText(Path.Combine(disk, "theirs.log"), "not hback's");
+
+        Assert.Equal(RunStatus.Ok, (await RunAsync(job)).Status);
+        Assert.Equal(["a.txt", "sub/b.txt", "theirs.log"], FilesUnder(disk));
+
+        // A change and a deletion: both old copies are kept, in hback's own folder.
+        Env.Write("a.txt", "two, and longer");
+        Directory.Delete(Env.PathOf("sub"), recursive: true);
+        var summary = await RunAsync(job);
+
+        Assert.Equal((RunStatus.Ok, 1, 1), (summary.Status, summary.Copied, summary.Removed));
+        Assert.Equal("two, and longer", File.ReadAllText(Path.Combine(disk, "a.txt")));
+        Assert.False(Directory.Exists(Path.Combine(disk, "sub")));
+        Assert.Equal("not hback's", File.ReadAllText(Path.Combine(disk, "theirs.log")));
+        Assert.False(Directory.Exists(Path.Combine(disk, BackupLayout.Current)));
+        var kept = FilesUnder(Path.Combine(disk, ".hback", "history"));
+        Assert.Equal(2, kept.Count);
+        Assert.EndsWith("/a.txt", kept[0]);
+        Assert.EndsWith("/sub/b.txt", kept[1]);
+        Assert.Equal("one", File.ReadAllText(Path.Combine(disk, ".hback", "history", kept[0])));
+        Assert.Empty(FilesUnder(Path.Combine(disk, ".hback", "partial")));
+
+        Assert.True((await new Verifier(Env.State, Env.Log).VerifyAsync(job.Destinations[0], fix: false, CancellationToken.None)).Ok);
+
+        // A restore gives back what is in the folder, and none of hback's own folders.
+        var target = Path.Combine(Env.Root, "restored");
+        var restored = await new Restorer(Env.State, Env.Log).RestoreAsync(job, job.Destinations[0], null, null, target, CancellationToken.None);
+        Assert.Equal(0, restored.Failed);
+        Assert.Equal(["a.txt", "theirs.log"], FilesUnder(target));
+        Assert.False(Directory.Exists(Path.Combine(target, ".hback")));
+
+        // The old copy can be had back by the original path of the file, though none of that path is kept.
+        var earlier = Path.Combine(Env.Root, "restored-earlier");
+        var run = Path.GetFileName(Assert.Single(Directory.GetDirectories(Path.Combine(disk, ".hback", "history"))));
+        await new Restorer(Env.State, Env.Log).RestoreAsync(job, job.Destinations[0], Env.PathOf("a.txt"), run, earlier, CancellationToken.None);
+        Assert.Equal("one", File.ReadAllText(Path.Combine(earlier, "a.txt")));
+    }
+
+    [SkippableFact]
+    public async Task A_file_that_is_in_the_way_is_kept_in_history_when_hback_replaces_it()
+    {
+        Env.Write("a.txt", "from the source");
+        var (job, disk) = Setup();
+        job = StraightIn(job);
+        Directory.CreateDirectory(disk);
+        File.WriteAllText(Path.Combine(disk, "a.txt"), "what was there before");
+
+        var summary = await RunAsync(job);
+
+        Assert.Equal(RunStatus.Ok, summary.Status);
+        Assert.Equal("from the source", File.ReadAllText(Path.Combine(disk, "a.txt")));
+        var kept = Assert.Single(FilesUnder(Path.Combine(disk, ".hback", "history")));
+        Assert.EndsWith("/a.txt", kept);
+        Assert.Equal("what was there before", File.ReadAllText(Path.Combine(disk, ".hback", "history", kept)));
+    }
+
+    [SkippableFact]
+    public async Task A_lost_database_is_rebuilt_without_going_into_hbacks_own_folders()
+    {
+        var long_ago = new DateTime(2023, 6, 1, 8, 0, 0, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(Env.Write("a.txt", "alpha"), long_ago);
+        File.SetLastWriteTimeUtc(Env.Write("sub/b.txt", "beta"), long_ago);
+        var (job, disk) = Setup();
+        job = StraightIn(job);
+        await RunAsync(job);
+        // A copy that was set aside, so that the history folder has something in it.
+        File.SetLastWriteTimeUtc(Env.Write("a.txt", "alpha, edited"), long_ago.AddDays(1));
+        await RunAsync(job);
+        Assert.NotEmpty(FilesUnder(Path.Combine(disk, ".hback", "history")));
+
+        await Env.LoseStateAsync();
+        var trouble = Trouble(job);
+        var summary = await Env.Runner(_ => trouble).RunOneAsync(job);
+
+        Assert.Equal((RunStatus.Ok, 2, 0), (summary.Status, summary.Adopted, summary.Copied));
+        Assert.Empty(trouble.Writes);
+        // Tidying up looks at the top of hback's two folders. Taking stock must not go down into them:
+        // the copies kept in history are not the files the destination holds.
+        Assert.DoesNotContain(trouble.Lists, folder => folder.StartsWith(".hback/history/", StringComparison.Ordinal)
+            || folder.StartsWith(".hback/partial/", StringComparison.Ordinal));
+    }
+
+    [SkippableFact]
+    public async Task A_source_file_that_would_land_in_hbacks_own_folder_stops_the_run_before_it_copies_anything()
+    {
+        Env.Write("a.txt", "alpha");
+        Env.Write(".hback/history/mine.txt", "a file of the source's own");
+        var (job, disk) = Setup();
+        job = StraightIn(job);
+
+        var summary = await RunAsync(job);
+
+        Assert.Equal(RunStatus.Failed, summary.Status);
+        Assert.False(summary.WorthRetrying);
+        Assert.Contains("where hback keeps its own files", summary.Message);
+        Assert.Contains("mine.txt", summary.Message);
+        Assert.Empty(FilesUnder(disk));
+
+        // With hback's folder under another name there is nothing in the way.
+        var moved = job.With(d => d with { HistoryFolder = ".kept" });
+        Assert.Equal(RunStatus.Ok, (await RunAsync(moved)).Status);
+        Assert.Equal([".hback/history/mine.txt", "a.txt"], FilesUnder(disk));
+    }
+
+    [SkippableFact]
+    public async Task Two_files_that_would_get_the_same_place_stop_the_run_before_it_copies_anything()
+    {
+        Env.Write("a.txt", "from the first source");
+        var second = Path.Combine(Env.Root, "src2");
+        Directory.CreateDirectory(second);
+        File.WriteAllText(Path.Combine(second, "a.txt"), "from the second source");
+        var (job, disk) = Setup();
+        job = StraightIn(job) with { Sources = [Env.SourceDir, second] };
+
+        var summary = await RunAsync(job);
+
+        Assert.Equal(RunStatus.Failed, summary.Status);
+        Assert.False(summary.WorthRetrying);
+        Assert.Contains("would both be stored as 'a.txt'", summary.Message);
+        Assert.Empty(FilesUnder(disk));
+
+        // Kept apart by the names of their sources, both arrive.
+        var apart = job.With(d => d with { SourcePath = SourcePathStyle.Name, CurrentFolder = "files" });
+        Assert.Equal(RunStatus.Ok, (await RunAsync(apart)).Status);
+        Assert.Equal(["src/a.txt", "src2/a.txt"], FilesUnder(Path.Combine(disk, "files")));
+    }
+
+    [SkippableFact]
+    public async Task Changing_how_much_of_the_path_is_kept_rearranges_the_destination()
+    {
+        Env.Write("a.txt", "alpha");
+        var (job, disk) = Setup();
+        await RunAsync(job);
+        Assert.Equal(InBackup("a.txt"), CurrentFiles(disk));
+
+        var summary = await RunAsync(job.With(d => d with { SourcePath = SourcePathStyle.Name }));
+
+        Assert.Equal((RunStatus.Ok, 1, 1), (summary.Status, summary.Copied, summary.Removed));
+        Assert.Equal(["src/a.txt"], CurrentFiles(disk));
+        Assert.EndsWith("/" + Env.InBackup("a.txt"), Assert.Single(HistoryFiles(disk)));
+    }
+
+    [SkippableFact]
+    public async Task Naming_another_folder_for_the_files_fills_that_folder_and_leaves_the_old_one_alone()
+    {
+        Env.Write("a.txt", "alpha");
+        var (job, disk) = Setup();
+        await RunAsync(job);
+
+        // What hback knows is in current/ says nothing about a folder it has never written to.
+        var summary = await RunAsync(job.With(d => d with { CurrentFolder = "files" }));
+
+        Assert.Equal((RunStatus.Ok, 1, 0), (summary.Status, summary.Copied, summary.Removed));
+        Assert.Equal(InBackup("a.txt"), FilesUnder(Path.Combine(disk, "files")));
+        Assert.Equal(InBackup("a.txt"), CurrentFiles(disk));
+        Assert.Empty(HistoryFiles(disk));
+    }
+
+    [SkippableFact]
+    public async Task Only_hbacks_own_leftovers_are_cleared_out_of_the_partial_folder()
+    {
+        Env.Write("a.txt", "alpha");
+        var (job, disk) = Setup();
+        var partial = Path.Combine(disk, BackupLayout.Partial);
+        Directory.CreateDirectory(partial);
+        File.WriteAllText(Path.Combine(partial, "notes.txt"), "someone else's file");
+        File.WriteAllText(Path.Combine(partial, BackupRunner.PartialName("C/gone.txt")), "half of a file that no longer exists");
+
+        Assert.Equal(RunStatus.Ok, (await RunAsync(job)).Status);
+
+        Assert.Equal(["notes.txt"], FilesUnder(partial));
+    }
+
+    [SkippableFact]
+    public async Task Every_destination_gets_the_files_and_one_out_of_reach_does_not_hold_up_the_others()
+    {
+        Env.Write("a.txt", "alpha");
+        var (job, first) = Setup();
+        var unreachable = NewDestination() with { Name = "second" };
+        var last = NewDestination();
+        job = job with { Destinations = [job.Destinations[0], unreachable, last] };
+        var trouble = new Troublemaker(DestinationFactory.For(unreachable, Env.State, Env.Log)) { OutOfReach = true };
+        var runner = Env.Runner(d => d.Name == "second" ? trouble : DestinationFactory.For(d, Env.State, Env.Log));
+
+        var summaries = await runner.RunAsync(job, dryRun: false, CancellationToken.None);
+
+        Assert.Equal([RunStatus.Ok, RunStatus.Failed, RunStatus.Ok], summaries.Select(s => s.Status));
+        Assert.Equal(InBackup("a.txt"), CurrentFiles(first));
+        Assert.Empty(CurrentFiles(DiskFolder(unreachable)));
+        Assert.Equal(InBackup("a.txt"), CurrentFiles(DiskFolder(last)));
+
+        // Asked for alone, the one that failed is served and the others are not gone through again.
+        trouble.OutOfReach = false;
+        var again = Assert.Single(await runner.RunAsync(job, dryRun: false, CancellationToken.None, [unreachable]));
+
+        Assert.Equal((RunStatus.Ok, 1), (again.Status, again.Copied));
+        Assert.Equal(InBackup("a.txt"), CurrentFiles(DiskFolder(unreachable)));
+        // What is known of each destination is kept apart: one run for the first, two for the second.
+        var ids = new List<long>();
+        foreach (var destination in job.Destinations)
+            ids.Add((await Env.State.FindDestinationIdAsync(destination.Id))!.Value);
+        Assert.Single(await Env.State.GetLastRunsAsync("test", ids[0], 10));
+        Assert.Equal(["ok", "failed"], (await Env.State.GetLastRunsAsync("test", ids[1], 10)).Select(r => r.Status));
+    }
+
+    #endregion
 }
 
 public sealed class LocalFolderBackupTests(ITestOutputHelper output) : BackupTests(output)
 {
+    private int _destinations;
+
     protected override string? Unavailable => null;
 
     protected override DestinationSpec NewDestination()
     {
-        var folder = Path.Combine(Env.Root, "dest");
+        var folder = Path.Combine(Env.Root, _destinations++ == 0 ? "dest" : "dest" + _destinations);
         Directory.CreateDirectory(folder);
         return new DestinationSpec { Root = folder };
+    }
+
+    [Fact]
+    public async Task Only_the_destinations_that_could_not_be_reached_are_tried_again()
+    {
+        Env.Write("a.txt", "alpha");
+        var unplugged = new DestinationSpec { Root = Path.Combine(Env.Root, "unplugged") };
+        var job = Env.Job(NewDestination()) with { Retries = 2, RetryWaitMinutes = 0 };
+        job = job with { Destinations = [job.Destinations[0], unplugged] };
+        using var loggers = LoggerFactory.Create(logging => logging.AddProvider(new TestLoggerProvider(Env.Log)));
+
+        var summaries = await new BackupService(Env.Paths, Env.State, loggers).RunAsync(job, retry: true, dryRun: false, CancellationToken.None);
+
+        Assert.Equal([RunStatus.Ok, RunStatus.Failed], summaries.Select(s => s.Status));
+        var reached = (await Env.State.FindDestinationIdAsync(job.Destinations[0].Id))!.Value;
+        var missing = (await Env.State.FindDestinationIdAsync(unplugged.Id))!.Value;
+        Assert.Single(await Env.State.GetLastRunsAsync("test", reached, 10));
+        Assert.Equal(3, (await Env.State.GetLastRunsAsync("test", missing, 10)).Count);
+    }
+
+    [Fact]
+    public async Task Runs_with_nothing_to_do_are_tidied_for_each_destination_by_itself()
+    {
+        Env.Write("a.txt", "alpha");
+        var job = Env.Job(NewDestination());
+        job = job with { Destinations = [job.Destinations[0], NewDestination()] };
+        var runner = Env.Runner();
+
+        for (var i = 0; i < 4; i++)
+            await runner.RunAsync(job, dryRun: false, CancellationToken.None);
+
+        // For each: the run that copied the file, and the latest of the three that found nothing
+        // to do. The runs of the two alternate in the record, and one must not clear away the other's.
+        foreach (var destination in job.Destinations)
+        {
+            var id = (await Env.State.FindDestinationIdAsync(destination.Id))!.Value;
+            Assert.Equal([0L, 1L], (await Env.State.GetLastRunsAsync("test", id, 50)).Select(r => r.Copied));
+        }
     }
 
     protected override string DiskFolder(DestinationSpec destination) => destination.Root;
@@ -618,7 +904,7 @@ public sealed class LocalFolderBackupTests(ITestOutputHelper output) : BackupTes
             Skip.If(true, "This account may not create symbolic links.");
         }
 
-        var scan = new SourceScanner().Scan(Env.Job(new DestinationSpec { Root = Env.Root }), [], CancellationToken.None);
+        var scan = new SourceScanner().Scan(Env.Job(new DestinationSpec { Root = Env.Root }), SourcePathStyle.Full, [], CancellationToken.None);
 
         Assert.Equal(InBackup("real/a.txt"), scan.Files.Select(f => f.BackupPath).ToList());
         Assert.Equal(1, scan.Links);
@@ -658,17 +944,17 @@ public sealed class SftpBackupTests(ITestOutputHelper output, SftpServerFixture 
 
         // The right key, written in the configuration, is accepted.
         Env.Write("b.txt", "beta");
-        var pinned = job with { Destination = job.Destination with { HostKey = remembered } };
+        var pinned = job.With(d => d with { HostKey = remembered });
         Assert.Equal(RunStatus.Ok, (await RunAsync(pinned)).Status);
 
         // Any other key is not, and nothing is sent.
         Env.Write("c.txt", "gamma");
-        var wrong = job with { Destination = job.Destination with { HostKey = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" } };
+        var wrong = job.With(d => d with { HostKey = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" });
         var refused = await RunAsync(wrong);
         Assert.Equal(RunStatus.Failed, refused.Status);
         Assert.Contains("in the configuration", refused.Message);
         Assert.Contains(remembered!, refused.Message);
-        Assert.Equal(InBackup("a.txt", "b.txt"), CurrentFiles(DiskFolder(job.Destination)));
+        Assert.Equal(InBackup("a.txt", "b.txt"), CurrentFiles(DiskFolder(job.Destinations[0])));
     }
 
     [SkippableFact]
@@ -692,7 +978,7 @@ public sealed class SftpBackupTests(ITestOutputHelper output, SftpServerFixture 
     {
         Env.Write("a.txt", "alpha");
         var (job, _) = Setup();
-        var wrong = job with { Destination = job.Destination with { Password = "not the password" } };
+        var wrong = job.With(d => d with { Password = "not the password" });
 
         var summary = await RunAsync(wrong);
 

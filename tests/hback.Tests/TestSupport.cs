@@ -11,6 +11,24 @@ using Xunit.Abstractions;
 
 namespace HBack.Tests;
 
+public static class RunnerExtensions
+{
+    /// <summary>Runs a backup that has one destination, and gives back how that run went.</summary>
+    public static async Task<RunSummary> RunOneAsync(this BackupRunner runner, BackupJob job, bool dryRun = false)
+        => Assert.Single(await runner.RunAsync(job, dryRun, CancellationToken.None));
+
+    /// <summary>The same backup, with its one destination changed.</summary>
+    public static BackupJob With(this BackupJob job, Func<DestinationSpec, DestinationSpec> change)
+        => job with { Destinations = [change(Assert.Single(job.Destinations))] };
+}
+
+/// <summary>Hands every logger of a host or a logger factory the one <see cref="TestLogger"/>.</summary>
+public sealed class TestLoggerProvider(TestLogger logger) : ILoggerProvider
+{
+    public ILogger CreateLogger(string categoryName) => logger;
+    public void Dispose() { }
+}
+
 /// <summary>Keeps what hback logs, and shows it in the test output.</summary>
 public sealed class TestLogger(ITestOutputHelper output) : ILogger
 {
@@ -95,12 +113,10 @@ public sealed class TestEnv : IAsyncDisposable
         Name = "test",
         Sources = [SourceDir],
         Excludes = excludes,
-        Destination = destination,
-        KeepHistoryDays = keepHistoryDays,
-        Parallel = 3,
+        Destinations = [destination with { KeepHistoryDays = keepHistoryDays, Parallel = 3 }],
     };
 
-    public BackupRunner Runner(Func<BackupJob, IDestinationFactory>? factories = null) => new(Paths, State, Log, factories)
+    public BackupRunner Runner(Func<DestinationSpec, IDestinationFactory>? factories = null) => new(Paths, State, Log, factories)
     {
         RetryDelays = [TimeSpan.FromMilliseconds(20)],
     };
@@ -294,6 +310,10 @@ public sealed class Troublemaker(IDestinationFactory inner) : IDestinationFactor
     public int? MaxConnections { get; set; }
 
     public ConcurrentQueue<(string Path, long Offset)> Writes { get; } = new();
+
+    /// <summary>The folders whose contents were asked for.</summary>
+    public ConcurrentQueue<string> Lists { get; } = new();
+
     public int Connections;
     public int MostOpenAtOnce;
     private int _completedWrites;
@@ -337,7 +357,11 @@ public sealed class Troublemaker(IDestinationFactory inner) : IDestinationFactor
         }
 
         public Task<DestinationEntry?> StatAsync(string path, CancellationToken ct) => real.StatAsync(path, ct);
-        public Task<List<DestinationEntry>> ListAsync(string folder, CancellationToken ct) => real.ListAsync(folder, ct);
+        public Task<List<DestinationEntry>> ListAsync(string folder, CancellationToken ct)
+        {
+            owner.Lists.Enqueue(folder);
+            return real.ListAsync(folder, ct);
+        }
         public Task CreateFolderAsync(string folder, CancellationToken ct) => real.CreateFolderAsync(folder, ct);
         public Task<long> SealAsync(string path, DateTime modifiedUtc, CancellationToken ct) => real.SealAsync(path, modifiedUtc, ct);
         public Task ReadAsync(string path, Stream output, CancellationToken ct) => real.ReadAsync(path, output, ct);
