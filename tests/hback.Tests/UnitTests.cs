@@ -563,13 +563,13 @@ public class ConfigTests : IDisposable
         Assert.Contains("two destinations named 'web'", entries[3].Error);
         Assert.Contains("<destinations> holds a <server>", entries[4].Error);
         // An address beside the settings, where it would be passed over, is pointed out.
-        Assert.Contains($"gives its address in a <path>. '{d}9' is not in one", entries[5].Error);
+        Assert.Contains("gives its address in a <path>. This one has text beside its settings", entries[5].Error);
         Assert.Contains("Backup 'bad folder': <history_folder>", entries[6].Error);
         Assert.Null(entries[7].Error);
     }
 
     [Fact]
-    public void A_list_of_destinations_can_have_lines_and_blocks_side_by_side()
+    public void A_list_of_destinations_can_hold_blocks_in_place_of_lines()
     {
         string At(string name) => Path.Combine(_folder, name);
         var entry = Assert.Single(Load($"""
@@ -578,25 +578,46 @@ public class ConfigTests : IDisposable
                 <name>site</name>
                 <sources>{At("code")}</sources>
                 <destinations>
-                  {At("first")}
+                  <destination>{At("site2")}</destination>
                   <destination>
                     <name>second</name>
-                    <path>{At("second")}</path>
-                    <keep_history_days>90</keep_history_days>
+                    <path>{At("7days")}</path>
+                    <keep_history_days>7</keep_history_days>
                   </destination>
-                  {At("third")}
-                  <destination>{At("fourth")}</destination>
-                  # not a destination
-                  {At("fifth")}
+                  <destination>{At("site")}</destination>
                 </destinations>
               </backup>
             </hback>
             """));
 
         Assert.Null(entry.Error);
-        // In the order they are written, which is the order they are served in.
-        Assert.Equal([At("first"), At("second"), At("third"), At("fourth"), At("fifth")], entry.Job!.Destinations.Select(d => d.Root));
-        Assert.Equal([30, 90, 30, 30, 30], entry.Job.Destinations.Select(d => d.KeepHistoryDays));
+        // In the order they are written, which is the order they are served in. The addresses are
+        // picked to trip a reader that looks for one text inside another: "site" is the start of
+        // "site2", and the 7 of the setting is in the address above it.
+        Assert.Equal([At("site2"), At("7days"), At("site")], entry.Job!.Destinations.Select(d => d.Root));
+        Assert.Equal([30, 7, 30], entry.Job.Destinations.Select(d => d.KeepHistoryDays));
+    }
+
+    [Fact]
+    public void A_list_of_destinations_is_lines_or_elements_and_a_mix_is_refused_whole()
+    {
+        string At(string name) => Path.Combine(_folder, name);
+        // The line would be easy to pass over while the element beside it is read. Neither is.
+        var entry = Assert.Single(Load($"""
+            <hback>
+              <backup>
+                <name>site</name>
+                <sources>{At("code")}</sources>
+                <destinations>
+                  {At("site2")}
+                  <destination>{At("site")}</destination>
+                </destinations>
+              </backup>
+            </hback>
+            """));
+
+        Assert.Null(entry.Job);
+        Assert.Contains("<destinations> has lines of text beside its <destination> elements", entry.Error);
     }
 
     [Fact]

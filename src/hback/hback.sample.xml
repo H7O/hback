@@ -88,7 +88,8 @@
     removes is kept for a week in .hback\history inside that folder.
 
     The private key is written once and holds for every destination. The last destination has a
-    setting of its own, so it is written as a block, with its address in <path>.
+    setting of its own, so it is written with its address in <path> and the setting beside it.
+    A list is either lines, as <sources> is, or <destination> elements as here, not both.
   -->
   <!--
   <backup>
@@ -104,8 +105,8 @@
     <keep_history_days>7</keep_history_days>
     <private_key>~\.ssh\id_ed25519</private_key>
     <destinations>
-      \\web1\apps\site
-      sftp://deploy@web2.example.com/var/www/site
+      <destination>\\web1\apps\site</destination>
+      <destination>sftp://deploy@web2.example.com/var/www/site</destination>
       <destination>
         <name>archive</name>
         <path>sftp://deploy@archive.example.com/srv/sites/site</path>

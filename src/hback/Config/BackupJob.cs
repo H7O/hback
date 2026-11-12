@@ -108,8 +108,8 @@ public sealed record BackupJob
     /// The destinations of a backup. They can be written three ways, which may be mixed:
     /// a <c>&lt;destination&gt;</c> element holding an address, repeated for each place;
     /// a <c>&lt;destination&gt;</c> element holding a <c>&lt;path&gt;</c> and settings of its own;
-    /// and a <c>&lt;destinations&gt;</c> element listing addresses one per line, as <c>&lt;sources&gt;</c> does,
-    /// with <c>&lt;destination&gt;</c> elements among the lines for the ones that need settings.
+    /// and a <c>&lt;destinations&gt;</c> element that either lists addresses one per line, as
+    /// <c>&lt;sources&gt;</c> does, or holds <c>&lt;destination&gt;</c> elements.
     /// A setting that a destination does not have itself is taken from the backup.
     /// </summary>
     private static List<DestinationSpec> ReadDestinations(IHTaskItem task, string name, Func<string, string?> fromBackup)
@@ -137,8 +137,9 @@ public sealed record BackupJob
             }
 
             // An address written beside the settings would otherwise be passed over without a word.
-            if (OwnText(element).FirstOrDefault(text => !string.IsNullOrWhiteSpace(text)) is { } stray)
-                throw new ConfigException($"Backup '{name}': a <destination> with settings of its own gives its address in a <path>. '{stray.Trim()}' is not in one.");
+            if (HasTextOfItsOwn(element))
+                throw new ConfigException($"Backup '{name}': a <destination> with settings of its own gives its address in a <path>. " +
+                    "This one has text beside its settings, which would not be read.");
 
             string? Own(string key) => Clean(element.GetItem(key)?.GetValue());
             Add(Own("path") ?? throw new ConfigException($"Backup '{name}': a <destination> with settings of its own needs a <path>, the folder or sftp:// address."),
@@ -158,17 +159,15 @@ public sealed record BackupJob
             }
             else
             {
-                // Lines and elements, in the order they are written.
-                var lines = OwnText(list);
-                for (var i = 0; i <= elements.Count; i++)
-                {
-                    foreach (var line in PathText.Lines(lines[i]))
-                        Add(line, fromBackup, null);
-                    if (i == elements.Count) break;
-                    if (!elements[i]!.Name.Equals("destination", StringComparison.OrdinalIgnoreCase))
-                        throw new ConfigException($"Backup '{name}': <destinations> holds a <{elements[i]!.Name}>. Inside it, list one address per line, and write a destination that needs settings of its own as a <destination>.");
-                    AddElement(elements[i]!);
-                }
+                if (elements.FirstOrDefault(e => !e!.Name.Equals("destination", StringComparison.OrdinalIgnoreCase)) is { } stranger)
+                    throw new ConfigException($"Backup '{name}': <destinations> holds a <{stranger.Name}>. Inside it, list one address per line, or write each destination as a <destination>.");
+                // Lines beside the elements can't be told apart from the elements' own text with any
+                // certainty, so they are not half-read: the list is one or the other.
+                if (HasTextOfItsOwn(list))
+                    throw new ConfigException($"Backup '{name}': <destinations> has lines of text beside its <destination> elements. " +
+                        "Write every destination in it as a <destination> element, or all of them as lines.");
+                foreach (var element in elements)
+                    AddElement(element!);
             }
         }
 
@@ -187,30 +186,19 @@ public sealed record BackupJob
     }
 
     /// <summary>
-    /// The text an element holds itself, apart from what its child elements hold. It comes in pieces:
-    /// the first is what stands before the first child, the last what stands after the last one, so
-    /// there is always one more piece than there are children.
+    /// Whether an element holds text itself, beside what its child elements hold.
     /// <para>
-    /// The scheduler's reader gives an element's text with its children's text run in, in the order of
-    /// the file. Taking each child's text out again, in that order, leaves the element's own.
+    /// The scheduler's reader gives an element's text with its children's text run in. Where one ends
+    /// and the other begins can't be found by searching: a child's text may well occur in the
+    /// element's own, as "D:\site" does in "D:\site2". How much there is of each can be counted,
+    /// though, and counting is exact. If the element has more letters than its children have between
+    /// them, the rest are its own.
     /// </para>
     /// </summary>
-    private static List<string> OwnText(IHTaskItem element)
+    private static bool HasTextOfItsOwn(IHTaskItem element)
     {
-        var all = element.RawValue ?? "";
-        var pieces = new List<string>();
-        var at = 0;
-        foreach (var child in element.Children ?? [])
-        {
-            if (child is null) continue;
-            var inner = child.RawValue ?? "";
-            var found = all.IndexOf(inner, at, StringComparison.Ordinal);
-            if (found < 0) found = at;
-            pieces.Add(all[at..found]);
-            at = found + inner.Length;
-        }
-        pieces.Add(all[at..]);
-        return pieces;
+        static int Letters(string? text) => (text ?? "").Count(c => !char.IsWhiteSpace(c));
+        return Letters(element.RawValue) > (element.Children ?? []).Sum(child => Letters(child?.RawValue));
     }
 
     /// <summary>"every 30 min", "once a day at 01:00", worded from the scheduler's own reading of the entry.</summary>

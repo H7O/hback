@@ -228,13 +228,14 @@ does not hold up the others, and when the service tries again it tries only that
 reports on each destination by itself.
 
 The backup's other settings hold for every destination in the list. Here the one private key is used
-for both servers. A destination that needs something of its own is written as a `<destination>` block
-among the lines, with its address in `<path>`:
+for both servers. A destination that needs something of its own is written as a `<destination>`
+element, with its address in `<path>` and its settings beside it. The others are then written as
+`<destination>` elements too, because a list holds either lines or elements, not both:
 
 ```xml
 <private_key>~\.ssh\id_ed25519</private_key>
 <destinations>
-  sftp://me@backup.example.com/backups/laptop
+  <destination>sftp://me@backup.example.com/backups/laptop</destination>
   <destination>
     <name>usb</name>
     <path>E:\backups\laptop</path>
@@ -243,11 +244,11 @@ among the lines, with its address in `<path>`:
 </destinations>
 ```
 
-A block can set anything in the table above from `private_key` to `partial_folder`. What it doesn't
-set, it takes from the backup. Its `<name>` is optional. The log and `hback status` call the
-destination by it, and `--destination` takes it on the command line.
+Such a destination can set anything in the table above from `private_key` to `partial_folder`. What
+it doesn't set, it takes from the backup. Its `<name>` is optional. The log and `hback status` call
+the destination by it, and `--destination` takes it on the command line.
 
-Repeating `<destination>` in the backup, once for each place, does the same as the list.
+Repeating `<destination>` in the backup itself, once for each place, does the same as the list.
 
 ### Where the files go
 
